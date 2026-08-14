@@ -79,8 +79,6 @@ if "_config_loaded" not in st.session_state:
 
 st.title("⚓ TC-rate calculator — live fish carrier")
 
-if st.session_state.get("_config_status"):
-    st.caption(f"Config status: {st.session_state['_config_status']}")
 st.caption(
     "Vessel TC-rate, leased equipment financing, and the combined total — "
     "all on a daily / monthly / annual basis."
@@ -191,6 +189,36 @@ def nok_input(label: str, state_key: str, default: float, key: str, disabled: bo
 
     st.text_input(label, key=key, on_change=_on_change, disabled=disabled)
     return st.session_state[state_key]
+
+
+def stateful_number_input(label, key=None, value=0.0, **kwargs):
+    """Drop-in replacement for st.number_input, protected against Streamlit
+    wiping the widget's saved value when it briefly isn't rendered (e.g. the
+    lock/unlock buttons call st.rerun() from partway through the script,
+    before Tab 1's widgets run — Streamlit treats any widget key that wasn't
+    freshly re-registered as 'gone' and clears it). A shadow key that's never
+    itself a widget's key= holds the true value and survives that cleanup,
+    the same protection nok_input already has via its separate state_key."""
+    shadow_key = f"__shadow_{key}"
+    if shadow_key not in st.session_state:
+        st.session_state[shadow_key] = value
+    if key not in st.session_state:
+        st.session_state[key] = st.session_state[shadow_key]
+    result = st.number_input(label, key=key, **kwargs)
+    st.session_state[shadow_key] = result
+    return result
+
+
+def stateful_toggle(label, key=None, value=False, **kwargs):
+    """Same shadow-key protection as stateful_number_input, for st.toggle."""
+    shadow_key = f"__shadow_{key}"
+    if shadow_key not in st.session_state:
+        st.session_state[shadow_key] = value
+    if key not in st.session_state:
+        st.session_state[key] = st.session_state[shadow_key]
+    result = st.toggle(label, key=key, **kwargs)
+    st.session_state[shadow_key] = result
+    return result
 
 
 def fmt(n):
@@ -333,8 +361,8 @@ def _on_opex_value_change(index):
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_vessel, tab_lease, tab_combined, tab_financials, tab_investment = st.tabs(
-    ["Vessel TC-rate", "Lease spread", "Combined TC-rate", "Financial Statements", "Investment Analysis"]
+tab_vessel, tab_lease, tab_combined, tab_financials, tab_investment, tab_summary = st.tabs(
+    ["Vessel TC-rate", "Lease spread", "Combined TC-rate", "Financial Statements", "Investment Analysis", "Summary"]
 )
 
 # ===========================================================================
@@ -346,10 +374,10 @@ with tab_vessel:
     with left:
         st.subheader("Capital & return")
         capex_nok = nok_input("Capex (NOK)", "capex_nok", 800_000_000.0, key="capex_input", disabled=locked)
-        ebitda_yield_pct = st.number_input(
+        ebitda_yield_pct = stateful_number_input(
             "EBITDA-yield (%)", min_value=0.0, value=12.0, step=0.1, key="ebitda_yield", disabled=locked
         )
-        operating_days = st.number_input(
+        operating_days = stateful_number_input(
             "Operating days / year", min_value=1, value=365, step=1, key="operating_days", disabled=locked
         )
 
@@ -381,9 +409,15 @@ with tab_vessel:
         st.markdown(f"**Total vessel opex:** {format_nok(opex_total)} NOK")
 
         st.subheader("Depreciation & maintenance")
-        depreciation_rate_pct = st.number_input(
-            "Depreciation rate, annual (%)", min_value=0.0, value=5.0, step=0.1,
+        depreciation_rate_pct = stateful_number_input(
+            "Vessel depreciation rate, annual (%)", min_value=0.0, value=2.5, step=0.1,
             key="depreciation_rate", disabled=locked
+        )
+        st.caption(
+            "Straight-line, % of original vessel capex per year. Leased "
+            "equipment (Tab 2) is depreciated separately, straight-line over "
+            "the same number of months as its financing term — see the "
+            "Lease spread tab."
         )
         annual_maintenance_capex_nok = nok_input(
             "Annual maintenance capex (NOK)", "maintenance_capex_nok", 5_000_000.0,
@@ -473,27 +507,34 @@ with tab_vessel:
     debt_left, debt_right = st.columns([1, 1.4], gap="large")
 
     with debt_left:
-        debt_multiple = st.number_input(
+        debt_multiple = stateful_number_input(
             "Debt multiple (x Year 1 EBITDA)", min_value=0.0, value=6.0, step=0.5,
             key="debt_multiple", disabled=locked
         )
-        amortization_years = st.number_input(
+        amortization_years = stateful_number_input(
             "Amortization profile (years)", min_value=1, max_value=30, value=12, step=1,
             key="amortization_years", disabled=locked
         )
-        swap_rate_pct = st.number_input(
+        swap_rate_pct = stateful_number_input(
             "Swap rate, annual (%)", min_value=0.0, value=3.0, step=0.1, key="swap_rate", disabled=locked
         )
-        credit_spread_pct = st.number_input(
+        credit_spread_pct = stateful_number_input(
             "Credit spread, annual (%)", min_value=0.0, value=2.0, step=0.1, key="credit_spread", disabled=locked
         )
 
         debt_nok = debt_multiple * required_ebitda_annual
         implied_ltv_pct = (debt_nok / capex_nok * 100) if capex_nok else 0.0
+        implied_equity_nok = capex_nok - debt_nok
         finance_cost_rate_pct = swap_rate_pct + credit_spread_pct
 
         st.markdown(f"**Debt:** {format_nok(debt_nok)} NOK")
         st.markdown(f"**Implied LTV:** {implied_ltv_pct:,.1f}%".replace(",", " "))
+        st.markdown(f"**Implied equity (capex − debt):** {format_nok(implied_equity_nok)} NOK")
+        st.caption(
+            "This covers the vessel purchase only. For an additional "
+            "operational cash buffer — sized off the worst point in the "
+            "monthly cash flow — see the Financial Statements tab."
+        )
 
         st.markdown("**Finance cost summary**")
         finance_cost_summary_df = pd.DataFrame(
@@ -551,6 +592,125 @@ with tab_vessel:
         debt_schedule_df = pd.DataFrame(debt_schedule)
         show_table(debt_schedule_df, "Month", width="stretch", height=300)
 
+    st.divider()
+    st.subheader("Sources & uses")
+    su = st.session_state.get("_sources_uses")
+    if su is None:
+        st.caption(
+            "Computing... this figure comes from the Financial Statements tab "
+            "and will appear after the page finishes loading."
+        )
+        cover_operational_funding = False
+        operational_equity_nok = 0.0
+        operational_debt_nok = 0.0
+    else:
+        deficit_guideline = abs(su["min_cash_balance"]) if su["min_cash_balance"] < 0 else 0.0
+
+        st.markdown("**Operational funding requirement**")
+        st.caption(
+            f"Guideline: {fmt(deficit_guideline)}, from the worst point in the monthly "
+            f"cash flow assuming **zero** operational funding (month {su['min_cash_month']}). "
+            f"This is a fixed target — it doesn't move depending on how much you "
+            f"choose to fund below." if deficit_guideline > 0 else
+            "Cash flow never dips negative — no operational funding is required."
+        )
+        cover_operational_funding = stateful_toggle(
+            "Cover the operational funding requirement?", value=False,
+            key="cover_operational_funding", disabled=locked
+        )
+
+        if cover_operational_funding and deficit_guideline > 0:
+            operational_equity_raw = nok_input(
+                "Operational funding — equity portion (NOK)", "operational_equity_nok", 0.0,
+                key="operational_equity_input", disabled=locked
+            )
+            # IMPORTANT: never write a corrected/capped value back into this
+            # widget's own state. The guideline above is computed on Tab 4
+            # from a run forced to ZERO operational funding, so — unlike the
+            # old design — it no longer moves depending on how much you fund
+            # here; it only changes if some other input (capex, opex,
+            # escalators, contracts, refinancing) was just edited on another
+            # tab, in which case it's one script pass behind until you
+            # switch tabs. Keep the raw typed amount untouched in the box
+            # regardless, and only cap it for the calculations below,
+            # recomputed fresh from the latest guideline every pass — so a
+            # temporarily-stale guideline can never permanently discard
+            # what the user typed.
+            operational_equity_nok = min(operational_equity_raw, deficit_guideline)
+            operational_debt_nok = deficit_guideline - operational_equity_nok
+            if operational_equity_raw > deficit_guideline:
+                st.caption(
+                    f"⚠️ You entered {fmt(operational_equity_raw)}, which is more than the "
+                    f"guideline ({fmt(deficit_guideline)}). Only {fmt(operational_equity_nok)} "
+                    f"is being applied below — the remainder isn't needed unless another "
+                    f"input on a different tab changes the guideline."
+                )
+            st.caption(
+                f"The remaining {fmt(operational_debt_nok)} is automatically funded as "
+                f"additional debt, at the same swap + credit spread rate and amortization "
+                f"profile as the vessel debt above."
+            )
+        else:
+            operational_equity_nok = 0.0
+            operational_debt_nok = 0.0
+
+        uncovered = 0.0 if cover_operational_funding else deficit_guideline
+
+        uses_col, sources_col = st.columns(2)
+        with uses_col:
+            st.markdown("**Uses**")
+            uses_df = pd.DataFrame([
+                {"Item": "Vessel capex", "Amount": capex_nok},
+                {"Item": "Equipment capex" + ("" if su["lease_enabled"] else " (off)"), "Amount": su["equipment_debt"] + su["equipment_equity"]},
+                {"Item": "Operational funding — equity portion", "Amount": operational_equity_nok},
+                {"Item": "Operational funding — debt portion", "Amount": operational_debt_nok},
+                {"Item": "Uncovered operational fund requirement", "Amount": uncovered},
+                {"Item": "Total uses", "Amount": capex_nok + su["equipment_debt"] + su["equipment_equity"] + operational_equity_nok + operational_debt_nok + uncovered},
+            ])
+            show_table(uses_df, "Item", width="stretch")
+        with sources_col:
+            st.markdown("**Sources**")
+            sources_df = pd.DataFrame([
+                {"Item": "Vessel debt", "Amount": su["vessel_debt"]},
+                {"Item": "Equipment debt" + ("" if su["lease_enabled"] else " (off)"), "Amount": su["equipment_debt"]},
+                {"Item": "Operational funding debt", "Amount": operational_debt_nok},
+                {"Item": "Vessel equity", "Amount": su["vessel_equity"]},
+                {"Item": "Equipment equity" + ("" if su["lease_enabled"] else " (off)"), "Amount": su["equipment_equity"]},
+                {"Item": "Operational funding equity", "Amount": operational_equity_nok},
+                {"Item": "Uncovered operational funding (equity or debt, TBD)", "Amount": uncovered},
+                {"Item": "Total sources", "Amount": su["vessel_debt"] + su["equipment_debt"] + operational_debt_nok + su["vessel_equity"] + su["equipment_equity"] + operational_equity_nok + uncovered},
+            ])
+            show_table(sources_df, "Item", width="stretch")
+
+        if uncovered > 0:
+            st.warning(
+                f"**{fmt(uncovered)} of the operational cash-deficit guideline is not "
+                f"funded.** Turn on 'Cover the operational funding requirement?' above "
+                f"to raise it as equity, debt, or a mix of both — otherwise it's left "
+                f"to group liquidity to absorb."
+            )
+
+        # store for Tab 4 (cash flow / balance sheet) and Tab 5 (IRR) to pick up
+        st.session_state["_operational_funding"] = {
+            "equity": operational_equity_nok,
+            "debt": operational_debt_nok,
+        }
+
+        if su["min_cash_balance"] < 0:
+            st.caption(
+                f"Operational equity buffer guideline: {fmt(abs(su['min_cash_balance']))}, "
+                f"from the worst point in the monthly cash flow (month {su['min_cash_month']}) "
+                f"— see the Financial Statements tab to adjust."
+            )
+        st.caption(
+            "This section mirrors the Financial Statements tab. The guideline "
+            "itself no longer depends on your funding choice above, so it "
+            "won't shift as you adjust the equity/debt split — it only lags "
+            "by one script pass if you've just changed a different input "
+            "(capex, opex, escalators, contracts, refinancing) on another "
+            "tab; switch tabs once or wait a moment for it to catch up."
+        )
+
 # ===========================================================================
 # TAB 2 — Lease spread (customer lease, with optional bank financing leg)
 # ===========================================================================
@@ -565,11 +725,11 @@ with tab_lease:
 
     toggle_col1, toggle_col2 = st.columns(2)
     with toggle_col1:
-        lease_enabled = st.toggle(
+        lease_enabled = stateful_toggle(
             "Include customer lease", value=False, key="lease_enabled", disabled=locked
         )
     with toggle_col2:
-        bank_financing_enabled = st.toggle(
+        bank_financing_enabled = stateful_toggle(
             "Include bank financing", value=False, key="bank_financing_enabled", disabled=locked
         )
 
@@ -578,11 +738,6 @@ with tab_lease:
             "Customer lease is currently **off**. Turn it on to add the "
             "equipment's lease payment to the Combined TC-rate. Inputs below "
             "are still editable so it's ready whenever you switch it on."
-        )
-        st.caption(
-            f"🔍 Debug: widget returned lease_enabled={lease_enabled} · "
-            f"session_state['lease_enabled']={st.session_state.get('lease_enabled')} · "
-            f"config status={st.session_state.get('_config_status', 'n/a')}"
         )
 
     left, right = st.columns([1, 1.4], gap="large")
@@ -594,10 +749,10 @@ with tab_lease:
         )
 
         st.markdown("**Customer lease (income)**")
-        lease_yield_pct = st.number_input(
+        lease_yield_pct = stateful_number_input(
             "Lease-out rate, annual (%)", min_value=0.0, value=12.0, step=0.1, key="lease_yield", disabled=locked
         )
-        customer_term_months = st.number_input(
+        customer_term_months = stateful_number_input(
             "Customer lease term (months)", min_value=1, max_value=120, value=60, step=1,
             key="customer_term", disabled=locked
         )
@@ -615,10 +770,10 @@ with tab_lease:
 
         if bank_financing_enabled:
             st.markdown("**Bank financing (cost)**")
-            bank_rate_pct = st.number_input(
+            bank_rate_pct = stateful_number_input(
                 "Bank interest rate, annual (%)", min_value=0.0, value=6.0, step=0.1, key="bank_rate", disabled=locked
             )
-            bank_term_months = st.number_input(
+            bank_term_months = stateful_number_input(
                 "Bank loan term (months)", min_value=1, max_value=120, value=84, step=1,
                 key="bank_term", disabled=locked
             )
@@ -899,26 +1054,30 @@ with tab_financials:
         "cost); the additional opex billed to the customer is a pass-through "
         "(net-zero EBITDA impact); equipment financing (leasing company) is "
         "treated the same way as the vessel's own bank debt, shown as a "
-        "separate line throughout. Maintenance capex is capitalized "
-        "(investing outflow, added to the vessel's balance sheet value) "
-        "rather than expensed. The cash flow statement is an EBITDA-down "
-        "bridge: EBITDA, less working capital build (from DSO/DPO), less "
-        "finance cost, less tax, less amortization and maintenance capex, "
-        "leaves cash flow for the period."
+        "separate line throughout. Depreciation is split into two lines: "
+        "the vessel depreciates straight-line at the rate set on Tab 1 (% "
+        "of original capex per year); leased equipment depreciates "
+        "straight-line over the same number of months as its own financing "
+        "term (Tab 2), reaching zero NBV once that term ends. Maintenance "
+        "capex is capitalized (investing outflow, added to the vessel's "
+        "balance sheet value) rather than expensed. The cash flow statement "
+        "is an EBITDA-down bridge: EBITDA, less working capital build (from "
+        "DSO/DPO), less finance cost, less tax, less amortization and "
+        "maintenance capex, leaves cash flow for the period."
     )
 
     st.subheader("Working capital & tax assumptions")
     wc_col1, wc_col2, wc_col3 = st.columns(3)
     with wc_col1:
-        dso_days = st.number_input(
+        dso_days = stateful_number_input(
             "Days sales outstanding (DSO)", min_value=0, value=30, step=1, key="dso_days", disabled=locked
         )
     with wc_col2:
-        dpo_days = st.number_input(
+        dpo_days = stateful_number_input(
             "Days payable outstanding (DPO)", min_value=0, value=20, step=1, key="dpo_days", disabled=locked
         )
     with wc_col3:
-        tax_rate_pct = st.number_input(
+        tax_rate_pct = stateful_number_input(
             "Corporate tax rate (%)", min_value=0.0, value=22.0, step=0.5, key="tax_rate", disabled=locked
         )
 
@@ -929,14 +1088,14 @@ with tab_financials:
     )
     esc_col1, esc_col2, esc_col3 = st.columns(3)
     with esc_col1:
-        tc_escalator_pct = st.number_input(
+        tc_escalator_pct = stateful_number_input(
             "TC revenue escalator (%/yr)", min_value=-100.0, value=2.0, step=0.5, key="tc_escalator", disabled=locked
         )
-        lease_escalator_pct = st.number_input(
+        lease_escalator_pct = stateful_number_input(
             "Lease payment escalator (%/yr)", min_value=-100.0, value=0.0, step=0.5, key="lease_escalator", disabled=locked
         )
     with esc_col2:
-        maintenance_escalator_pct = st.number_input(
+        maintenance_escalator_pct = stateful_number_input(
             "Maintenance capex escalator (%/yr)", min_value=-100.0, value=2.0, step=0.5,
             key="maintenance_escalator", disabled=locked
         )
@@ -948,7 +1107,7 @@ with tab_financials:
         default_esc = 3.0 if item["name"].strip().lower() == "crewing" else 2.0
         col = esc_cols[i % len(esc_cols)]
         with col:
-            esc_pct = st.number_input(
+            esc_pct = stateful_number_input(
                 f"{item['name']} (%/yr)", min_value=-100.0, value=default_esc, step=0.5,
                 key=f"opex_escalator_{i}", disabled=locked
             )
@@ -961,21 +1120,21 @@ with tab_financials:
         "spread) and amortization profile as the initial debt. Any excess "
         "over the outstanding balance at that point is released as cash."
     )
-    refinancing_enabled = st.toggle(
+    refinancing_enabled = stateful_toggle(
         "Enable debt refinancing", value=True, key="refinancing_enabled", disabled=locked
     )
     if refinancing_enabled:
         refi_col1, refi_col2, refi_col3 = st.columns(3)
         with refi_col1:
-            refi_year1 = st.number_input(
+            refi_year1 = stateful_number_input(
                 "First refinancing (year)", min_value=1, value=4, step=1, key="refi_year1", disabled=locked
             )
         with refi_col2:
-            refi_year2 = st.number_input(
+            refi_year2 = stateful_number_input(
                 "Second refinancing (year)", min_value=1, value=8, step=1, key="refi_year2", disabled=locked
             )
         with refi_col3:
-            releverage_multiple = st.number_input(
+            releverage_multiple = stateful_number_input(
                 "Releverage multiple (x next year's EBITDA)", min_value=0.0,
                 value=float(debt_multiple), step=0.5, key="releverage_multiple", disabled=locked
             )
@@ -1014,7 +1173,7 @@ with tab_financials:
 
     c1a, c1b = st.columns(2)
     with c1a:
-        contract1_length = st.number_input(
+        contract1_length = stateful_number_input(
             "Contract 1 length (months)", min_value=1, value=int(horizon_months),
             step=1, key="contract1_length", disabled=locked
         )
@@ -1067,7 +1226,7 @@ with tab_financials:
         rcol1, rcol2, rcol3 = st.columns(3)
         with rcol1:
             if i < 4:
-                length = st.number_input(
+                length = stateful_number_input(
                     f"Contract {i} length (months) — 0 to skip", min_value=0, value=0,
                     step=1, key=f"contract{i}_length", disabled=locked
                 )
@@ -1136,7 +1295,7 @@ with tab_financials:
                 )
 
     monthly_opex_vessel_base = opex_total / 12
-    monthly_depreciation = (capex_nok * (depreciation_rate_pct / 100)) / 12
+    monthly_vessel_depreciation = (capex_nok * (depreciation_rate_pct / 100)) / 12
     monthly_maintenance_base = annual_maintenance_capex_nok / 12
 
     opex_line_items_base = [
@@ -1147,6 +1306,15 @@ with tab_financials:
     equipment_capex = lease_capex_nok if lease_enabled else 0.0
     equipment_debt_initial = bank_loan_principal if (lease_enabled and bank_financing_enabled) else 0.0
     equipment_equity_initial = equipment_capex - equipment_debt_initial
+
+    # Equipment is depreciated straight-line over the same number of months
+    # as its financing term (bank_term_months) — whether or not bank
+    # financing is actually switched on, since bank_term_months already
+    # falls back to the customer lease term in that case (see Tab 2).
+    equipment_depreciation_months = int(bank_term_months) if (lease_enabled and equipment_capex > 0) else 0
+    monthly_equipment_depreciation = (
+        equipment_capex / equipment_depreciation_months if equipment_depreciation_months else 0.0
+    )
 
     if monthly_revenue_vessel_base < (monthly_opex_vessel_base + debt_schedule[0]["Monthly finance cost"]):
         st.warning(
@@ -1167,187 +1335,273 @@ with tab_financials:
         escalation_periods = year_number - 1  # 0 in Year 1, 1 in Year 2 (month 13+), ...
         return (1 + rate_pct / 100) ** escalation_periods
 
-    pnl_rows = []
-    cf_rows = []
-    bs_rows = []
+    # --- operational funding, decided on Tab 1's Sources & Uses (runs earlier
+    #     in the script, so this is already set for the current pass) ---
+    _op_funding = st.session_state.get("_operational_funding", {"equity": 0.0, "debt": 0.0})
+    operational_equity_nok = _op_funding["equity"]
+    operational_debt_nok = _op_funding["debt"]
 
-    cumulative_cash = 0.0
-    cumulative_depreciation = 0.0
-    cumulative_maintenance_capex = 0.0
-    cumulative_capex_adjustment = 0.0
     vessel_equity_initial = capex_nok - debt_nok
-    equity = vessel_equity_initial + equipment_equity_initial
 
-    bs_rows.append({
-        "Month": 0,
-        "Vessel (NBV)": capex_nok,
-        "Leased equipment (NBV)": equipment_capex,
-        "Accounts receivable": 0.0,
-        "Cash": 0.0,
-        "Total assets": capex_nok + equipment_capex,
-        "Debt — vessel (bank)": debt_nok,
-        "Debt — equipment (leasing company)": equipment_debt_initial,
-        "Accounts payable": 0.0,
-        "Equity": equity,
-        "Total liabilities + equity": debt_nok + equipment_debt_initial + equity,
-    })
+    def _run_monthly_model(op_equity_nok, op_debt_nok):
+        """Runs the full monthly P&L / cash flow / balance sheet model for a
+        given operational-funding split. Pulled into a function so it can be
+        run twice: once with whatever funding the user actually chose (for
+        the real statements and IRR), and once forced to zero funding, purely
+        to read off a stable, funding-independent guideline — see the call
+        site below for why that removes the circularity entirely rather than
+        iterating toward it."""
+        pnl_rows_ = []
+        cf_rows_ = []
+        bs_rows_ = []
 
-    prev_nwc = 0.0
-    vessel_debt_balance = debt_nok
-    vessel_quarterly_amort = quarterly_amortization_nok
-    vessel_cycle_month = 0
-    vessel_monthly_rate = (finance_cost_rate_pct / 100) / 12
+        cumulative_cash = op_equity_nok + op_debt_nok  # injected upfront, month 0
+        cumulative_vessel_depreciation = 0.0
+        cumulative_equipment_depreciation = 0.0
+        cumulative_maintenance_capex = 0.0
+        cumulative_capex_adjustment = 0.0
+        equity = vessel_equity_initial + equipment_equity_initial + op_equity_nok
 
-    for month in range(1, horizon_months + 1):
-        vessel_cycle_month += 1
-        refinancing_proceeds_this_month = 0.0
+        bs_rows_.append({
+            "Month": 0,
+            "Vessel (NBV)": capex_nok,
+            "Leased equipment (NBV)": equipment_capex,
+            "Accounts receivable": 0.0,
+            "Cash": cumulative_cash,
+            "Total assets": capex_nok + equipment_capex + cumulative_cash,
+            "Debt — vessel (bank)": debt_nok,
+            "Debt — equipment (leasing company)": equipment_debt_initial,
+            "Debt — operational funding": op_debt_nok,
+            "Accounts payable": 0.0,
+            "Equity": equity,
+            "Total liabilities + equity": debt_nok + equipment_debt_initial + op_debt_nok + equity,
+        })
 
-        if month in refi_trigger_months:
-            # trigger month is the first month of the "coming year" itself
-            # (e.g. refi_year=4 -> trigger month 49 -> that's the first month
-            # of Year 5), so no extra +1 is needed here.
-            target_year = (month - 1) // 12 + 1
-            target_month_for_projection = month
-            projected_monthly_revenue = _get_vessel_revenue(target_month_for_projection)
-            projected_monthly_opex = sum(
-                item["monthly"] * _escalation_factor(item["escalator_pct"], target_month_for_projection)
-                for item in opex_line_items_base
-            )
-            projected_annual_ebitda_vessel = (projected_monthly_revenue - projected_monthly_opex) * 12
-            new_principal = releverage_multiple * projected_annual_ebitda_vessel
-            refinancing_proceeds_this_month = new_principal - vessel_debt_balance
-            vessel_debt_balance = new_principal
-            vessel_quarterly_amort = new_principal / (amortization_years * 4)
-            vessel_cycle_month = 1  # this month is month 1 of the new amortization cycle
-
-        vessel_opening_balance = vessel_debt_balance
-        vessel_finance_cost = vessel_opening_balance * vessel_monthly_rate
-        vessel_is_quarter_end = (vessel_cycle_month % 3 == 0)
-        vessel_amortization = vessel_quarterly_amort if vessel_is_quarter_end else 0.0
-        vessel_debt_balance = vessel_opening_balance - vessel_amortization
-        vessel_debt_closing = vessel_debt_balance
-
-        # --- escalated revenue & opex for this month ---
-        monthly_revenue_vessel = _get_vessel_revenue(month)
-
-        if lease_enabled and month <= int(customer_term_months):
-            lease_factor = _escalation_factor(lease_escalator_pct, month)
-            lease_revenue_this_month = lease_monthly_payment * lease_factor
-            lease_opex_this_month = lease_opex_monthly_nok  # pass-through, not escalated
-        else:
-            lease_revenue_this_month = 0.0
-            lease_opex_this_month = 0.0
-
-        escalated_opex_items = []
-        monthly_opex_vessel = 0.0
-        for item in opex_line_items_base:
-            factor = _escalation_factor(item["escalator_pct"], month)
-            escalated_value = item["monthly"] * factor
-            escalated_opex_items.append({"name": item["name"], "value": escalated_value})
-            monthly_opex_vessel += escalated_value
-
-        maintenance_factor = _escalation_factor(maintenance_escalator_pct, month)
-        monthly_maintenance = monthly_maintenance_base * maintenance_factor
-
-        if lease_enabled and bank_financing_enabled:
-            eq_debt_row = _row_or_zero(bank_schedule_full, month, int(bank_term_months))
-            equipment_finance_cost = eq_debt_row["Finance cost"]
-            equipment_amortization = eq_debt_row["Amortization"]
-            equipment_debt_closing = eq_debt_row["Closing balance"]
-        else:
-            equipment_finance_cost = 0.0
-            equipment_amortization = 0.0
-            equipment_debt_closing = 0.0
-
-        # --- combined P&L ---
-        revenue = monthly_revenue_vessel + lease_revenue_this_month + lease_opex_this_month
-        total_opex = monthly_opex_vessel + lease_opex_this_month
-        ebitda_vessel = monthly_revenue_vessel - monthly_opex_vessel
-        ebitda_equipment = lease_revenue_this_month  # pass-through opex nets to zero
-        ebitda = ebitda_vessel + ebitda_equipment
-        ebit = ebitda - monthly_depreciation
-        finance_cost_total = vessel_finance_cost + equipment_finance_cost
-        ebt = ebit - finance_cost_total
-        tax = ebt * (tax_rate_pct / 100)
-        net_income = ebt - tax
-
-        pnl_row = {"Month": month}
-        pnl_row["TC-revenue"] = monthly_revenue_vessel
-        pnl_row["Lease-revenue"] = lease_revenue_this_month
-        pnl_row["Pass-through costs"] = lease_opex_this_month
-        pnl_row["Total revenue"] = revenue
-        for item in escalated_opex_items:
-            pnl_row[item["name"]] = -item["value"]
-        pnl_row["Equipment opex (pass-through)"] = -lease_opex_this_month
-        pnl_row["EBITDA — vessel"] = ebitda_vessel
-        pnl_row["EBITDA — equipment"] = ebitda_equipment
-        pnl_row["EBITDA"] = ebitda
-        pnl_row["Depreciation"] = -monthly_depreciation
-        pnl_row["EBIT"] = ebit
-        pnl_row["Finance cost — vessel (bank)"] = -vessel_finance_cost
-        pnl_row["Finance cost — equipment (leasing company)"] = -equipment_finance_cost
-        pnl_row["EBT"] = ebt
-        pnl_row["Tax"] = -tax
-        pnl_row["Net income"] = net_income
-        pnl_rows.append(pnl_row)
-
-        # --- working capital: tracks the current (escalated) vessel run-rate ---
-        daily_revenue_now = monthly_revenue_vessel * 12 / 365
-        daily_opex_now = monthly_opex_vessel * 12 / 365
-        ar_balance = daily_revenue_now * dso_days
-        ap_balance = daily_opex_now * dpo_days
-        this_nwc = ar_balance - ap_balance
-        wc_change = this_nwc - prev_nwc
-        prev_nwc = this_nwc
-
-        cf_after_wc = ebitda - wc_change
-        cf_after_finance = cf_after_wc - finance_cost_total
-        cf_after_tax = cf_after_finance - tax
-        capex_adjustment_this_month = capex_delta_by_month.get(month, 0.0)
-        cash_flow_for_period = (
-            cf_after_tax - vessel_amortization - equipment_amortization - monthly_maintenance
-            + refinancing_proceeds_this_month - capex_adjustment_this_month
-        )
-        cumulative_cash += cash_flow_for_period
-
-        cf_rows.append({
-            "Month": month,
-            "EBITDA": ebitda,
-            "Working capital change": -wc_change,
-            "Finance cost — vessel (bank)": -vessel_finance_cost,
-            "Finance cost — equipment (leasing company)": -equipment_finance_cost,
-            "Tax": -tax,
-            "Amortization — vessel (bank)": -vessel_amortization,
-            "Amortization — equipment (leasing company)": -equipment_amortization,
-            "Maintenance capex": -monthly_maintenance,
-            "Capex adjustment (vessel upgrade/downgrade)": -capex_adjustment_this_month,
-            "Refinancing proceeds (vessel)": refinancing_proceeds_this_month,
-            "Cash flow for the period": cash_flow_for_period,
+        # --- month 0 on the cash flow statement: the operational funding
+        # injected upfront (equity + debt), before month 1's operations begin.
+        # Shown here so it's possible to see, side by side, the opening cash
+        # available going into month 1 — and to compare "Cash flow for the
+        # period" month-by-month with and without covering the liquidity gap,
+        # since none of the other flow lines depend on this injection (see
+        # "Cash flow for the period" below, month 1 onward, which is
+        # independent of operational funding whenever it's debt-free).
+        cf_rows_.append({
+            "Month": 0,
+            "EBITDA": 0.0,
+            "Working capital change": 0.0,
+            "Finance cost — vessel (bank)": 0.0,
+            "Finance cost — equipment (leasing company)": 0.0,
+            "Finance cost — operational funding": 0.0,
+            "Tax": 0.0,
+            "Amortization — vessel (bank)": 0.0,
+            "Amortization — equipment (leasing company)": 0.0,
+            "Amortization — operational funding": 0.0,
+            "Maintenance capex": 0.0,
+            "Capex adjustment (vessel upgrade/downgrade)": 0.0,
+            "Refinancing proceeds (vessel)": 0.0,
+            "Operational funding injected (equity + debt)": op_equity_nok + op_debt_nok,
+            "Cash flow for the period": op_equity_nok + op_debt_nok,
             "Cash balance": cumulative_cash,
         })
 
-        cumulative_depreciation += monthly_depreciation
-        cumulative_maintenance_capex += monthly_maintenance
-        cumulative_capex_adjustment += capex_adjustment_this_month
-        vessel_nbv = capex_nok - cumulative_depreciation + cumulative_maintenance_capex + cumulative_capex_adjustment
-        equipment_nbv = equipment_capex
-        equity += net_income
-        total_assets = vessel_nbv + equipment_nbv + ar_balance + cumulative_cash
-        total_liab_equity = vessel_debt_closing + equipment_debt_closing + ap_balance + equity
+        prev_nwc = 0.0
+        vessel_debt_balance = debt_nok
+        vessel_quarterly_amort = quarterly_amortization_nok
+        vessel_cycle_month = 0
+        vessel_monthly_rate = (finance_cost_rate_pct / 100) / 12
 
-        bs_rows.append({
-            "Month": month,
-            "Vessel (NBV)": vessel_nbv,
-            "Leased equipment (NBV)": equipment_nbv,
-            "Accounts receivable": ar_balance,
-            "Cash": cumulative_cash,
-            "Total assets": total_assets,
-            "Debt — vessel (bank)": vessel_debt_closing,
-            "Debt — equipment (leasing company)": equipment_debt_closing,
-            "Accounts payable": ap_balance,
-            "Equity": equity,
-            "Total liabilities + equity": total_liab_equity,
-        })
+        operational_debt_balance = op_debt_nok
+        operational_quarterly_amort = op_debt_nok / (amortization_years * 4) if amortization_years else 0.0
+        operational_cycle_month = 0
+
+        for month in range(1, horizon_months + 1):
+            vessel_cycle_month += 1
+            operational_cycle_month += 1
+            refinancing_proceeds_this_month = 0.0
+
+            if month in refi_trigger_months:
+                # trigger month is the first month of the "coming year" itself
+                # (e.g. refi_year=4 -> trigger month 49 -> that's the first month
+                # of Year 5), so no extra +1 is needed here.
+                target_month_for_projection = month
+                projected_monthly_revenue = _get_vessel_revenue(target_month_for_projection)
+                projected_monthly_opex = sum(
+                    item["monthly"] * _escalation_factor(item["escalator_pct"], target_month_for_projection)
+                    for item in opex_line_items_base
+                )
+                projected_annual_ebitda_vessel = (projected_monthly_revenue - projected_monthly_opex) * 12
+                new_principal = releverage_multiple * projected_annual_ebitda_vessel
+                refinancing_proceeds_this_month = new_principal - vessel_debt_balance
+                vessel_debt_balance = new_principal
+                vessel_quarterly_amort = new_principal / (amortization_years * 4)
+                vessel_cycle_month = 1  # this month is month 1 of the new amortization cycle
+
+            vessel_opening_balance = vessel_debt_balance
+            vessel_finance_cost = vessel_opening_balance * vessel_monthly_rate
+            vessel_is_quarter_end = (vessel_cycle_month % 3 == 0)
+            vessel_amortization = vessel_quarterly_amort if vessel_is_quarter_end else 0.0
+            vessel_debt_balance = vessel_opening_balance - vessel_amortization
+            vessel_debt_closing = vessel_debt_balance
+
+            # --- operational funding debt tranche (same rate/terms as vessel debt) ---
+            operational_opening_balance = operational_debt_balance
+            operational_finance_cost = operational_opening_balance * vessel_monthly_rate
+            operational_is_quarter_end = (operational_cycle_month % 3 == 0)
+            operational_amortization = operational_quarterly_amort if operational_is_quarter_end else 0.0
+            operational_debt_balance = operational_opening_balance - operational_amortization
+            operational_debt_closing = operational_debt_balance
+
+            # --- escalated revenue & opex for this month ---
+            monthly_revenue_vessel = _get_vessel_revenue(month)
+
+            if lease_enabled and month <= int(customer_term_months):
+                lease_factor = _escalation_factor(lease_escalator_pct, month)
+                lease_revenue_this_month = lease_monthly_payment * lease_factor
+                lease_opex_this_month = lease_opex_monthly_nok  # pass-through, not escalated
+            else:
+                lease_revenue_this_month = 0.0
+                lease_opex_this_month = 0.0
+
+            # --- equipment depreciation: straight-line, stops once the
+            # equipment financing term (equipment_depreciation_months) has
+            # elapsed, leaving NBV at exactly 0 rather than going negative ---
+            if equipment_depreciation_months and month <= equipment_depreciation_months:
+                equipment_depreciation_this_month = monthly_equipment_depreciation
+            else:
+                equipment_depreciation_this_month = 0.0
+
+            escalated_opex_items = []
+            monthly_opex_vessel = 0.0
+            for item in opex_line_items_base:
+                factor = _escalation_factor(item["escalator_pct"], month)
+                escalated_value = item["monthly"] * factor
+                escalated_opex_items.append({"name": item["name"], "value": escalated_value})
+                monthly_opex_vessel += escalated_value
+
+            maintenance_factor = _escalation_factor(maintenance_escalator_pct, month)
+            monthly_maintenance = monthly_maintenance_base * maintenance_factor
+
+            if lease_enabled and bank_financing_enabled:
+                eq_debt_row = _row_or_zero(bank_schedule_full, month, int(bank_term_months))
+                equipment_finance_cost = eq_debt_row["Finance cost"]
+                equipment_amortization = eq_debt_row["Amortization"]
+                equipment_debt_closing = eq_debt_row["Closing balance"]
+            else:
+                equipment_finance_cost = 0.0
+                equipment_amortization = 0.0
+                equipment_debt_closing = 0.0
+
+            # --- combined P&L ---
+            revenue = monthly_revenue_vessel + lease_revenue_this_month + lease_opex_this_month
+            ebitda_vessel = monthly_revenue_vessel - monthly_opex_vessel
+            ebitda_equipment = lease_revenue_this_month  # pass-through opex nets to zero
+            ebitda = ebitda_vessel + ebitda_equipment
+            ebit = ebitda - monthly_vessel_depreciation - equipment_depreciation_this_month
+            finance_cost_total = vessel_finance_cost + equipment_finance_cost + operational_finance_cost
+            ebt = ebit - finance_cost_total
+            tax = ebt * (tax_rate_pct / 100)
+            net_income = ebt - tax
+
+            pnl_row = {"Month": month}
+            pnl_row["TC-revenue"] = monthly_revenue_vessel
+            pnl_row["Lease-revenue"] = lease_revenue_this_month
+            pnl_row["Pass-through costs"] = lease_opex_this_month
+            pnl_row["Total revenue"] = revenue
+            for item in escalated_opex_items:
+                pnl_row[item["name"]] = -item["value"]
+            pnl_row["Equipment opex (pass-through)"] = -lease_opex_this_month
+            pnl_row["EBITDA — vessel"] = ebitda_vessel
+            pnl_row["EBITDA — equipment"] = ebitda_equipment
+            pnl_row["EBITDA"] = ebitda
+            pnl_row["Depreciation — vessel"] = -monthly_vessel_depreciation
+            pnl_row["Depreciation — equipment"] = -equipment_depreciation_this_month
+            pnl_row["EBIT"] = ebit
+            pnl_row["Finance cost — vessel (bank)"] = -vessel_finance_cost
+            pnl_row["Finance cost — equipment (leasing company)"] = -equipment_finance_cost
+            pnl_row["Finance cost — operational funding"] = -operational_finance_cost
+            pnl_row["EBT"] = ebt
+            pnl_row["Tax"] = -tax
+            pnl_row["Net income"] = net_income
+            pnl_rows_.append(pnl_row)
+
+            # --- working capital: tracks the current (escalated) vessel run-rate ---
+            daily_revenue_now = monthly_revenue_vessel * 12 / 365
+            daily_opex_now = monthly_opex_vessel * 12 / 365
+            ar_balance = daily_revenue_now * dso_days
+            ap_balance = daily_opex_now * dpo_days
+            this_nwc = ar_balance - ap_balance
+            wc_change = this_nwc - prev_nwc
+            prev_nwc = this_nwc
+
+            cf_after_wc = ebitda - wc_change
+            cf_after_finance = cf_after_wc - finance_cost_total
+            cf_after_tax = cf_after_finance - tax
+            capex_adjustment_this_month = capex_delta_by_month.get(month, 0.0)
+            cash_flow_for_period = (
+                cf_after_tax - vessel_amortization - equipment_amortization - operational_amortization
+                - monthly_maintenance + refinancing_proceeds_this_month - capex_adjustment_this_month
+            )
+            cumulative_cash += cash_flow_for_period
+
+            cf_rows_.append({
+                "Month": month,
+                "EBITDA": ebitda,
+                "Working capital change": -wc_change,
+                "Finance cost — vessel (bank)": -vessel_finance_cost,
+                "Finance cost — equipment (leasing company)": -equipment_finance_cost,
+                "Finance cost — operational funding": -operational_finance_cost,
+                "Tax": -tax,
+                "Amortization — vessel (bank)": -vessel_amortization,
+                "Amortization — equipment (leasing company)": -equipment_amortization,
+                "Amortization — operational funding": -operational_amortization,
+                "Maintenance capex": -monthly_maintenance,
+                "Capex adjustment (vessel upgrade/downgrade)": -capex_adjustment_this_month,
+                "Refinancing proceeds (vessel)": refinancing_proceeds_this_month,
+                "Operational funding injected (equity + debt)": 0.0,
+                "Cash flow for the period": cash_flow_for_period,
+                "Cash balance": cumulative_cash,
+            })
+
+            cumulative_vessel_depreciation += monthly_vessel_depreciation
+            cumulative_equipment_depreciation += equipment_depreciation_this_month
+            cumulative_maintenance_capex += monthly_maintenance
+            cumulative_capex_adjustment += capex_adjustment_this_month
+            vessel_nbv = capex_nok - cumulative_vessel_depreciation + cumulative_maintenance_capex + cumulative_capex_adjustment
+            equipment_nbv = max(0.0, equipment_capex - cumulative_equipment_depreciation)
+            equity += net_income
+            total_assets = vessel_nbv + equipment_nbv + ar_balance + cumulative_cash
+            total_liab_equity = vessel_debt_closing + equipment_debt_closing + operational_debt_closing + ap_balance + equity
+
+            bs_rows_.append({
+                "Month": month,
+                "Vessel (NBV)": vessel_nbv,
+                "Leased equipment (NBV)": equipment_nbv,
+                "Accounts receivable": ar_balance,
+                "Cash": cumulative_cash,
+                "Total assets": total_assets,
+                "Debt — vessel (bank)": vessel_debt_closing,
+                "Debt — equipment (leasing company)": equipment_debt_closing,
+                "Debt — operational funding": operational_debt_closing,
+                "Accounts payable": ap_balance,
+                "Equity": equity,
+                "Total liabilities + equity": total_liab_equity,
+            })
+
+        return pnl_rows_, cf_rows_, bs_rows_
+
+    # --- run twice: the REAL statements use whatever funding the user chose
+    # on Tab 1 (possibly a mix of equity and debt); a separate, throwaway
+    # BASELINE run forced to zero funding gives a stable guideline that
+    # never moves depending on how much was funded — see the caption on
+    # Tab 1's Sources & Uses for why this replaces the old iterative
+    # approach entirely. ---
+    pnl_rows, cf_rows, bs_rows = _run_monthly_model(operational_equity_nok, operational_debt_nok)
+    _baseline_pnl_rows, _baseline_cf_rows, _baseline_bs_rows = _run_monthly_model(0.0, 0.0)
+    _baseline_cash_series = [row["Cash balance"] for row in _baseline_cf_rows]
+    _baseline_month_series = [row["Month"] for row in _baseline_cf_rows]
+    _baseline_min_idx = _baseline_cash_series.index(min(_baseline_cash_series))
+    baseline_min_cash_balance = _baseline_cash_series[_baseline_min_idx]
+    baseline_min_cash_month = _baseline_month_series[_baseline_min_idx]
 
     pnl_df = pd.DataFrame(pnl_rows)
     cf_df = pd.DataFrame(cf_rows)
@@ -1407,10 +1661,10 @@ with tab_financials:
     with cf_tab:
         view = st.radio("View", ["Monthly", "Annual"], horizontal=True, key="cf_view")
         if view == "Monthly":
-            st.markdown(f"**Cash flow (EBITDA bridge)** — months 1 to {horizon_months}")
+            st.markdown(f"**Cash flow (EBITDA bridge)** — month 0 (opening) to month {horizon_months}")
             show_table(to_horizontal(cf_df, "Month", "Month"), width="stretch", height=380)
         else:
-            st.markdown(f"**Annual cash flow (EBITDA bridge)** — Year 1 to Year {cf_annual.index.max()}")
+            st.markdown(f"**Annual cash flow (EBITDA bridge)** — Year 0 (opening) to Year {cf_annual.index.max()}")
             show_table(to_horizontal_indexed(cf_annual, "Year"), width="stretch", height=380)
 
         chart_df = pd.DataFrame({
@@ -1440,6 +1694,83 @@ with tab_financials:
                 f"{format_nok(max_imbalance)} NOK. This shouldn't happen; flag it if you see it."
             )
 
+    # =======================================================================
+    # Operational funding summary
+    # =======================================================================
+    st.divider()
+    st.subheader("Operational funding")
+    st.caption(
+        "The vessel's implied equity (Tab 1) covers the purchase price only — "
+        "it assumes the cash balance starts at zero and simply accumulates "
+        "from there. If the monthly cash flow ever dips negative before it "
+        "recovers, that's a real shortfall that needs covering so the vessel "
+        "never actually runs out of cash. **Decide how to cover it on Tab 1's "
+        "Sources & Uses section** — this is just a summary of what's "
+        "currently applied there. The guideline below is always the deficit "
+        "that would exist with **zero** operational funding — a fixed target "
+        "that doesn't move depending on how much you choose to fund, so "
+        "there's nothing to iterate towards."
+    )
+
+    # Actual, as-funded minimum (reflects whatever funding is currently applied)
+    min_cash_balance = cf_df["Cash balance"].min()
+    min_cash_month = int(cf_df.loc[cf_df["Cash balance"].idxmin(), "Month"])
+
+    # The guideline: computed above from a SEPARATE run forced to zero
+    # funding, so it's a fixed number that never depends on the funding
+    # decision itself — no circularity, no staleness, no iteration needed.
+    deficit_guideline_fixed = abs(baseline_min_cash_balance) if baseline_min_cash_balance < 0 else 0.0
+
+    st.metric(
+        "Maximum cash deficit (guideline, zero funding)",
+        fmt(deficit_guideline_fixed),
+        help=(
+            f"With no operational funding at all, cumulative cash balance "
+            f"bottoms out at {fmt(baseline_min_cash_balance)} in month "
+            f"{baseline_min_cash_month}. This is the fixed target used to "
+            f"size the equity/debt split on Tab 1 — it does not change "
+            f"based on how much of it you actually fund."
+        ) if deficit_guideline_fixed > 0 else "Cash flow never dips negative even with zero funding."
+    )
+
+    if min_cash_balance < 0:
+        st.caption(
+            f"⚠️ **With the funding currently applied**, cash balance still goes "
+            f"as low as {fmt(min_cash_balance)} in month {min_cash_month}."
+        )
+    else:
+        st.caption(
+            f"✅ **With the funding currently applied**, cash balance never goes "
+            f"negative — lowest point is {fmt(min_cash_balance)} in month {min_cash_month}."
+        )
+
+    op_col1, op_col2 = st.columns(2)
+    op_col1.metric("Operational funding — equity portion", fmt(operational_equity_nok))
+    op_col2.metric("Operational funding — debt portion", fmt(operational_debt_nok))
+
+    total_equity_required = vessel_equity_initial + equipment_equity_initial + operational_equity_nok
+    st.markdown(
+        f"**Total equity required:** {fmt(vessel_equity_initial)} (vessel) + "
+        f"{fmt(equipment_equity_initial)} (equipment) + {fmt(operational_equity_nok)} (operational, equity portion) "
+        f"= **{fmt(total_equity_required)}**"
+    )
+
+    # --- store for the Sources & Uses summary on Tab 1 (which runs earlier in
+    #     the script and can't compute this itself — see the note there).
+    #     Crucially, this is the FIXED, zero-funding guideline, not the
+    #     as-funded minimum — so it's stable pass to pass regardless of what
+    #     funding decision was made, eliminating the old circularity. ---
+    st.session_state["_sources_uses"] = {
+        "vessel_equity": vessel_equity_initial,
+        "equipment_equity": equipment_equity_initial,
+        "total_equity": total_equity_required,
+        "min_cash_balance": baseline_min_cash_balance,
+        "min_cash_month": baseline_min_cash_month,
+        "vessel_debt": debt_nok,
+        "equipment_debt": equipment_debt_initial,
+        "lease_enabled": lease_enabled,
+    }
+
 # ===========================================================================
 # TAB 5 — Investment Analysis (equity IRR, terminal value on forward EBITDA)
 # ===========================================================================
@@ -1455,7 +1786,7 @@ with tab_investment:
         "equipment) is deducted to arrive at terminal equity value."
     )
 
-    terminal_multiple = st.number_input(
+    terminal_multiple = stateful_number_input(
         "Terminal EBITDA multiple (x forward EBITDA)", min_value=0.0, value=10.0,
         step=0.5, key="terminal_multiple", disabled=locked
     )
@@ -1493,7 +1824,24 @@ with tab_investment:
     st.metric("Terminal equity value", fmt(terminal_equity_value))
 
     # --- build the monthly equity cash flow stream ---
-    initial_equity_investment = vessel_equity_initial + equipment_equity_initial
+    st.subheader("Equity invested")
+    st.caption(
+        "How the vessel, equipment, and any operational funding are financed "
+        "is decided on Tab 1's Sources & Uses section — the equity portion "
+        "chosen there is included in the month 0 investment below, matching "
+        "the cash flow model exactly (any debt portion instead shows up as "
+        "ongoing interest and amortization, already reflected in the monthly "
+        "cash flow). To raise this IRR, cover less of the operational funding "
+        "with equity on Tab 1 and let debt (or group liquidity) absorb more "
+        "of it."
+    )
+    if operational_debt_nok > 0:
+        st.caption(
+            f"Currently: {fmt(operational_equity_nok)} equity + {fmt(operational_debt_nok)} "
+            f"debt covering the operational funding requirement."
+        )
+
+    initial_equity_investment = vessel_equity_initial + equipment_equity_initial + operational_equity_nok
     equity_cf_rows = [{"Month": 0, "Equity cash flow": -initial_equity_investment}]
     for _, row in cf_df.iterrows():
         m = int(row["Month"])
@@ -1552,6 +1900,121 @@ with tab_investment:
     formatted_line_chart(chart_df, "Month", ["Cumulative equity cash flow"])
 
     show_table(equity_cf_df, "Month", width="stretch", height=320)
+
+# ===========================================================================
+# TAB 6 — Summary (key financial ratios & KPIs)
+# ===========================================================================
+with tab_summary:
+    st.subheader("Summary — key financial ratios & KPIs")
+    st.caption(
+        "First working version — definitions below are a starting point; "
+        "flag anything you'd like calculated differently (e.g. NIBD scope, "
+        "ICR basis, LTV basis) and we'll refine it."
+    )
+
+    total_capex_at_close = capex_nok + equipment_capex
+    total_debt_at_close = debt_nok + equipment_debt_initial + operational_debt_nok
+    total_equity_at_close = vessel_equity_initial + equipment_equity_initial + operational_equity_nok
+    ltv_at_close = (total_debt_at_close / total_capex_at_close) if total_capex_at_close else 0.0
+    gearing_at_close = (total_debt_at_close / total_equity_at_close) if total_equity_at_close else 0.0
+
+    st.markdown("**Financial close snapshot (Month 0)**")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total capex", fmt(total_capex_at_close))
+    c2.metric("Total debt at close", fmt(total_debt_at_close))
+    c3.metric("Total equity at close", fmt(total_equity_at_close))
+    c4.metric("LTV at close", f"{ltv_at_close:.1%}")
+    c5.metric("Gearing (debt / equity)", f"{gearing_at_close:.2f}x")
+
+    st.divider()
+    st.markdown("**Investment return KPIs**")
+    i1, i2, i3, i4 = st.columns(4)
+    if monthly_irr is None:
+        i1.metric("Equity IRR, annual", "n/a")
+        i2.metric("MOIC", "n/a")
+    else:
+        i1.metric("Equity IRR, annual", f"{annual_irr:+.1%}")
+        i2.metric("MOIC", f"{moic:.2f}x")
+
+    _year1_ebitda = pnl_annual.loc[1, "EBITDA"] if 1 in pnl_annual.index else 0.0
+    _yield_on_capex_yr1 = (_year1_ebitda / total_capex_at_close) if total_capex_at_close else 0.0
+    _year1_nbv = (
+        (bs_annual.loc[1, "Vessel (NBV)"] + bs_annual.loc[1, "Leased equipment (NBV)"])
+        if 1 in bs_annual.index else 0.0
+    )
+    _yield_on_nbv_yr1 = (_year1_ebitda / _year1_nbv) if _year1_nbv else 0.0
+    i3.metric("EBITDA yield on capex (Yr 1)", f"{_yield_on_capex_yr1:.1%}")
+    i4.metric("EBITDA yield on NBV (Yr 1)", f"{_yield_on_nbv_yr1:.1%}")
+
+    st.divider()
+    st.markdown("**Annual ratios**")
+    st.caption(
+        "NIBD = total debt (vessel + equipment + operational funding) less "
+        "cash, at year-end. ICR = EBITDA / total finance cost. LTV is shown "
+        "on both a declining (current NBV) and a fixed (original capex) "
+        "basis. ROE = net income (annual) / book equity net of cash — as "
+        "if all cash on the balance sheet had been distributed out as a "
+        "dividend, so the equity base only reflects capital still tied up "
+        "in the vessel, equipment, and working capital."
+    )
+
+    ratio_rows = []
+    for y in pnl_annual.index:
+        if y not in bs_annual.index:
+            continue
+        ebitda_y = pnl_annual.loc[y, "EBITDA"]
+        finance_cost_y = -(
+            pnl_annual.loc[y, "Finance cost — vessel (bank)"]
+            + pnl_annual.loc[y, "Finance cost — equipment (leasing company)"]
+            + pnl_annual.loc[y, "Finance cost — operational funding"]
+        )
+        debt_total_y = (
+            bs_annual.loc[y, "Debt — vessel (bank)"]
+            + bs_annual.loc[y, "Debt — equipment (leasing company)"]
+            + bs_annual.loc[y, "Debt — operational funding"]
+        )
+        cash_y = bs_annual.loc[y, "Cash"]
+        nibd_y = debt_total_y - cash_y
+        vessel_nbv_y = bs_annual.loc[y, "Vessel (NBV)"]
+        equipment_nbv_y = bs_annual.loc[y, "Leased equipment (NBV)"]
+        nbv_total_y = vessel_nbv_y + equipment_nbv_y
+        book_equity_y = bs_annual.loc[y, "Equity"]
+        net_income_y = pnl_annual.loc[y, "Net income"]
+
+        nibd_ebitda = (nibd_y / ebitda_y) if ebitda_y else None
+        icr = (ebitda_y / finance_cost_y) if finance_cost_y else None
+        ltv_nbv_basis = (debt_total_y / nbv_total_y) if nbv_total_y else None
+        ltv_capex_basis = (debt_total_y / total_capex_at_close) if total_capex_at_close else None
+        yield_nbv = (ebitda_y / nbv_total_y) if nbv_total_y else None
+        yield_capex = (ebitda_y / total_capex_at_close) if total_capex_at_close else None
+        # As if all cash had been distributed out as a dividend: book equity
+        # net of cash, used as the denominator for ROE below.
+        book_equity_ex_cash_y = book_equity_y - cash_y
+        roe = (net_income_y / book_equity_ex_cash_y) if book_equity_ex_cash_y else None
+
+        ratio_rows.append({
+            "Year": f"Year {int(y)}",
+            "EBITDA": fmt(ebitda_y),
+            "NIBD": fmt(nibd_y),
+            "NIBD / EBITDA (x)": f"{nibd_ebitda:.2f}x" if nibd_ebitda is not None else "—",
+            "Finance cost, total": fmt(finance_cost_y),
+            "ICR — EBITDA / finance cost (x)": f"{icr:.2f}x" if icr is not None else "—",
+            "Total debt, period-end": fmt(debt_total_y),
+            "Fixed assets NBV, period-end": fmt(nbv_total_y),
+            "LTV — debt / NBV (%)": f"{ltv_nbv_basis:.1%}" if ltv_nbv_basis is not None else "—",
+            "LTV — debt / original capex (%)": f"{ltv_capex_basis:.1%}" if ltv_capex_basis is not None else "—",
+            "EBITDA yield on NBV (%)": f"{yield_nbv:.1%}" if yield_nbv is not None else "—",
+            "EBITDA yield on original capex (%)": f"{yield_capex:.1%}" if yield_capex is not None else "—",
+            "Vessel book value (NBV), period-end": fmt(vessel_nbv_y),
+            "Equipment book value (NBV), period-end": fmt(equipment_nbv_y),
+            "Book equity, period-end": fmt(book_equity_y),
+            "Book equity excl. cash (as if dividended out)": fmt(book_equity_ex_cash_y),
+            "ROE — net income / book equity excl. cash (%)": f"{roe:.1%}" if roe is not None else "—",
+        })
+
+    ratio_df = pd.DataFrame(ratio_rows).set_index("Year").T
+    ratio_df.index.name = "Metric"
+    st.dataframe(ratio_df, width="stretch", height=460)
 
 # ===========================================================================
 # Excel export — every table in the app, on one workbook, one click
@@ -1627,6 +2090,7 @@ def _build_workbook() -> bytes:
         bs_df.to_excel(writer, sheet_name="Balance sheet (monthly)", index=False)
         bs_annual.to_excel(writer, sheet_name="Balance sheet (annual)")
         equity_cf_df.to_excel(writer, sheet_name="Equity cash flow (IRR)", index=False)
+        ratio_df.to_excel(writer, sheet_name="Summary ratios")
         _style_workbook(writer.book)
     buffer.seek(0)
     return buffer.getvalue()
@@ -1640,4 +2104,14 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
+# ---------------------------------------------------------------------------
+# Force exactly one automatic rerun after the very first script execution.
+# Tab 1's "Sources & Uses" reads a value computed on Tab 4 (which runs later
+# in this script) — on a true first load, Tab 1 renders before that value
+# exists. This rerun makes sure even a passive, never-interacts viewer sees
+# the correct number immediately, without needing to touch anything.
+# ---------------------------------------------------------------------------
 
+if not st.session_state.get("_initial_rerun_done"):
+    st.session_state["_initial_rerun_done"] = True
+    st.rerun()
