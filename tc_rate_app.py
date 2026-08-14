@@ -13,6 +13,8 @@ Run locally with:
     streamlit run tc_rate_app.py
 """
 
+import json
+import os
 import re
 from io import BytesIO
 
@@ -30,6 +32,31 @@ st.set_page_config(
     layout="wide",
 )
 
+# ---------------------------------------------------------------------------
+# Auto-load a saved configuration, if one has been committed to the repo.
+# This is what makes "your well-qualified inputs" the default everyone sees —
+# see the "Configuration" section in the sidebar to save/load one.
+# ---------------------------------------------------------------------------
+
+CONFIG_FILE = "default_config.json"
+CONFIG_EXCLUDE_KEYS = {"unlocked", "unlock_password_input", "_config_loaded"}
+
+
+def _apply_config(config_dict):
+    for k, v in config_dict.items():
+        if k not in CONFIG_EXCLUDE_KEYS:
+            st.session_state[k] = v
+
+
+if "_config_loaded" not in st.session_state:
+    st.session_state["_config_loaded"] = True
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                _apply_config(json.load(f))
+        except Exception:
+            pass  # fall back to the code's built-in defaults if the file is missing/corrupt
+
 st.title("⚓ TC-rate calculator — live fish carrier")
 st.caption(
     "Vessel TC-rate, leased equipment financing, and the combined total — "
@@ -37,6 +64,74 @@ st.caption(
 )
 
 currency = st.text_input("Currency", value="NOK", key="currency_input").strip() or "NOK"
+
+# ---------------------------------------------------------------------------
+# Lock / unlock — colleagues get a read-only view by default; a password
+# unlocks editing. Change UNLOCK_PASSWORD to whatever you want to use.
+# ---------------------------------------------------------------------------
+
+UNLOCK_PASSWORD = "trident2026"  # <-- change this to your own password
+
+if "unlocked" not in st.session_state:
+    st.session_state.unlocked = False
+
+with st.sidebar:
+    st.subheader("🔒 Edit access")
+    if st.session_state.unlocked:
+        st.success("Unlocked — inputs are editable.")
+        if st.button("Lock again"):
+            st.session_state.unlocked = False
+            st.rerun()
+    else:
+        st.caption("All inputs are locked (view-only). Enter the password to edit.")
+        pwd = st.text_input("Password", type="password", key="unlock_password_input")
+        if st.button("Unlock"):
+            if pwd == UNLOCK_PASSWORD:
+                st.session_state.unlocked = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+
+locked = not st.session_state.unlocked
+
+with st.sidebar:
+    if not locked:
+        st.divider()
+        st.subheader("💾 Configuration")
+        st.caption(
+            "Save your current inputs as the default everyone sees "
+            "(including in locked view-only mode)."
+        )
+
+        config_to_save = {k: v for k, v in dict(st.session_state).items() if k not in CONFIG_EXCLUDE_KEYS}
+        config_json = json.dumps(config_to_save, default=str, indent=2)
+        st.download_button(
+            "Save current inputs as default",
+            data=config_json,
+            file_name=CONFIG_FILE,
+            mime="application/json",
+        )
+        st.caption(
+            f"Downloads **{CONFIG_FILE}** — commit it to the same GitHub repo "
+            f"as `tc_rate_app.py` (same folder) and the app will auto-load it "
+            f"for every visitor from then on."
+        )
+
+        uploaded_config = st.file_uploader("Or load a saved configuration", type="json", key="config_uploader")
+        if uploaded_config is not None:
+            try:
+                loaded = json.load(uploaded_config)
+                _apply_config(loaded)
+                st.success("Configuration loaded.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't load that file: {e}")
+
+if locked:
+    st.info(
+        "🔒 **View-only mode.** All figures below reflect the current saved "
+        "assumptions. To change any input, enter the password in the sidebar."
+    )
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -57,7 +152,7 @@ def parse_nok(s: str) -> float:
         return 0.0
 
 
-def nok_input(label: str, state_key: str, default: float, key: str) -> float:
+def nok_input(label: str, state_key: str, default: float, key: str, disabled: bool = False) -> float:
     """A text input that displays with thousand separators and re-formats
     itself every time the value changes (on Enter / click-away), rather
     than freezing on whatever was last typed."""
@@ -71,7 +166,7 @@ def nok_input(label: str, state_key: str, default: float, key: str) -> float:
         st.session_state[state_key] = value
         st.session_state[key] = format_nok(value)
 
-    st.text_input(label, key=key, on_change=_on_change)
+    st.text_input(label, key=key, on_change=_on_change, disabled=disabled)
     return st.session_state[state_key]
 
 
@@ -227,12 +322,12 @@ with tab_vessel:
 
     with left:
         st.subheader("Capital & return")
-        capex_nok = nok_input("Capex (NOK)", "capex_nok", 800_000_000.0, key="capex_input")
+        capex_nok = nok_input("Capex (NOK)", "capex_nok", 800_000_000.0, key="capex_input", disabled=locked)
         ebitda_yield_pct = st.number_input(
-            "EBITDA-yield (%)", min_value=0.0, value=12.0, step=0.1, key="ebitda_yield"
+            "EBITDA-yield (%)", min_value=0.0, value=12.0, step=0.1, key="ebitda_yield", disabled=locked
         )
         operating_days = st.number_input(
-            "Operating days / year", min_value=1, value=365, step=1, key="operating_days"
+            "Operating days / year", min_value=1, value=365, step=1, key="operating_days", disabled=locked
         )
 
         st.subheader("Vessel opex (annual, NOK)")
@@ -240,7 +335,8 @@ with tab_vessel:
             c1, c2, c3 = st.columns([2.2, 1.6, 0.4])
             with c1:
                 item["name"] = st.text_input(
-                    "Name", value=item["name"], key=f"name_{i}", label_visibility="collapsed"
+                    "Name", value=item["name"], key=f"name_{i}", label_visibility="collapsed",
+                    disabled=locked
                 )
             with c2:
                 if f"value_{i}" not in st.session_state:
@@ -251,11 +347,12 @@ with tab_vessel:
                     label_visibility="collapsed",
                     on_change=_on_opex_value_change,
                     args=(i,),
+                    disabled=locked,
                 )
             with c3:
-                st.button("✕", key=f"remove_{i}", on_click=remove_opex_item, args=(i,))
+                st.button("✕", key=f"remove_{i}", on_click=remove_opex_item, args=(i,), disabled=locked)
 
-        st.button("+ Add opex line item", on_click=add_opex_item)
+        st.button("+ Add opex line item", on_click=add_opex_item, disabled=locked)
 
         opex_total = sum(item["value_nok"] for item in st.session_state.opex_items)
         st.markdown(f"**Total vessel opex:** {format_nok(opex_total)} NOK")
@@ -263,11 +360,11 @@ with tab_vessel:
         st.subheader("Depreciation & maintenance")
         depreciation_rate_pct = st.number_input(
             "Depreciation rate, annual (%)", min_value=0.0, value=5.0, step=0.1,
-            key="depreciation_rate"
+            key="depreciation_rate", disabled=locked
         )
         annual_maintenance_capex_nok = nok_input(
             "Annual maintenance capex (NOK)", "maintenance_capex_nok", 5_000_000.0,
-            key="maintenance_capex_input"
+            key="maintenance_capex_input", disabled=locked
         )
 
     # --- calculations ---
@@ -355,17 +452,17 @@ with tab_vessel:
     with debt_left:
         debt_multiple = st.number_input(
             "Debt multiple (x Year 1 EBITDA)", min_value=0.0, value=6.0, step=0.5,
-            key="debt_multiple"
+            key="debt_multiple", disabled=locked
         )
         amortization_years = st.number_input(
             "Amortization profile (years)", min_value=1, max_value=30, value=12, step=1,
-            key="amortization_years"
+            key="amortization_years", disabled=locked
         )
         swap_rate_pct = st.number_input(
-            "Swap rate, annual (%)", min_value=0.0, value=3.0, step=0.1, key="swap_rate"
+            "Swap rate, annual (%)", min_value=0.0, value=3.0, step=0.1, key="swap_rate", disabled=locked
         )
         credit_spread_pct = st.number_input(
-            "Credit spread, annual (%)", min_value=0.0, value=2.0, step=0.1, key="credit_spread"
+            "Credit spread, annual (%)", min_value=0.0, value=2.0, step=0.1, key="credit_spread", disabled=locked
         )
 
         debt_nok = debt_multiple * required_ebitda_annual
@@ -446,11 +543,11 @@ with tab_lease:
     toggle_col1, toggle_col2 = st.columns(2)
     with toggle_col1:
         lease_enabled = st.toggle(
-            "Include customer lease", value=False, key="lease_enabled"
+            "Include customer lease", value=False, key="lease_enabled", disabled=locked
         )
     with toggle_col2:
         bank_financing_enabled = st.toggle(
-            "Include bank financing", value=False, key="bank_financing_enabled"
+            "Include bank financing", value=False, key="bank_financing_enabled", disabled=locked
         )
 
     if not lease_enabled:
@@ -465,20 +562,20 @@ with tab_lease:
     with left:
         st.markdown("**Equipment**")
         lease_capex_nok = nok_input(
-            "Capex (NOK)", "lease_capex_nok", 15_000_000.0, key="lease_capex_input"
+            "Capex (NOK)", "lease_capex_nok", 15_000_000.0, key="lease_capex_input", disabled=locked
         )
 
         st.markdown("**Customer lease (income)**")
         lease_yield_pct = st.number_input(
-            "Lease-out rate, annual (%)", min_value=0.0, value=12.0, step=0.1, key="lease_yield"
+            "Lease-out rate, annual (%)", min_value=0.0, value=12.0, step=0.1, key="lease_yield", disabled=locked
         )
         customer_term_months = st.number_input(
             "Customer lease term (months)", min_value=1, max_value=120, value=60, step=1,
-            key="customer_term"
+            key="customer_term", disabled=locked
         )
         lease_opex_monthly_nok = nok_input(
             "Additional opex billed to customer (NOK/month)", "lease_opex_monthly_nok",
-            100_000.0, key="lease_opex_input"
+            100_000.0, key="lease_opex_input", disabled=locked
         )
         st.caption(
             "This opex is billed to the customer on top of the lease payment, "
@@ -491,15 +588,15 @@ with tab_lease:
         if bank_financing_enabled:
             st.markdown("**Bank financing (cost)**")
             bank_rate_pct = st.number_input(
-                "Bank interest rate, annual (%)", min_value=0.0, value=6.0, step=0.1, key="bank_rate"
+                "Bank interest rate, annual (%)", min_value=0.0, value=6.0, step=0.1, key="bank_rate", disabled=locked
             )
             bank_term_months = st.number_input(
                 "Bank loan term (months)", min_value=1, max_value=120, value=84, step=1,
-                key="bank_term"
+                key="bank_term", disabled=locked
             )
             lease_equity_instalment_nok = nok_input(
                 "Equity instalment (NOK)", "lease_equity_instalment_nok", 0.0,
-                key="lease_equity_instalment_input"
+                key="lease_equity_instalment_input", disabled=locked
             )
             st.caption(
                 "Portion of the equipment capex funded by equity rather than "
@@ -786,15 +883,15 @@ with tab_financials:
     wc_col1, wc_col2, wc_col3 = st.columns(3)
     with wc_col1:
         dso_days = st.number_input(
-            "Days sales outstanding (DSO)", min_value=0, value=30, step=1, key="dso_days"
+            "Days sales outstanding (DSO)", min_value=0, value=30, step=1, key="dso_days", disabled=locked
         )
     with wc_col2:
         dpo_days = st.number_input(
-            "Days payable outstanding (DPO)", min_value=0, value=20, step=1, key="dpo_days"
+            "Days payable outstanding (DPO)", min_value=0, value=20, step=1, key="dpo_days", disabled=locked
         )
     with wc_col3:
         tax_rate_pct = st.number_input(
-            "Corporate tax rate (%)", min_value=0.0, value=22.0, step=0.5, key="tax_rate"
+            "Corporate tax rate (%)", min_value=0.0, value=22.0, step=0.5, key="tax_rate", disabled=locked
         )
 
     st.subheader("Escalators (annual, first adjustment in month 13)")
@@ -805,15 +902,15 @@ with tab_financials:
     esc_col1, esc_col2, esc_col3 = st.columns(3)
     with esc_col1:
         tc_escalator_pct = st.number_input(
-            "TC revenue escalator (%/yr)", min_value=-100.0, value=2.0, step=0.5, key="tc_escalator"
+            "TC revenue escalator (%/yr)", min_value=-100.0, value=2.0, step=0.5, key="tc_escalator", disabled=locked
         )
         lease_escalator_pct = st.number_input(
-            "Lease payment escalator (%/yr)", min_value=-100.0, value=0.0, step=0.5, key="lease_escalator"
+            "Lease payment escalator (%/yr)", min_value=-100.0, value=0.0, step=0.5, key="lease_escalator", disabled=locked
         )
     with esc_col2:
         maintenance_escalator_pct = st.number_input(
             "Maintenance capex escalator (%/yr)", min_value=-100.0, value=2.0, step=0.5,
-            key="maintenance_escalator"
+            key="maintenance_escalator", disabled=locked
         )
 
     st.markdown("**Vessel opex escalators**")
@@ -825,7 +922,7 @@ with tab_financials:
         with col:
             esc_pct = st.number_input(
                 f"{item['name']} (%/yr)", min_value=-100.0, value=default_esc, step=0.5,
-                key=f"opex_escalator_{i}"
+                key=f"opex_escalator_{i}", disabled=locked
             )
         opex_escalator_pcts.append(esc_pct)
 
@@ -837,22 +934,22 @@ with tab_financials:
         "over the outstanding balance at that point is released as cash."
     )
     refinancing_enabled = st.toggle(
-        "Enable debt refinancing", value=True, key="refinancing_enabled"
+        "Enable debt refinancing", value=True, key="refinancing_enabled", disabled=locked
     )
     if refinancing_enabled:
         refi_col1, refi_col2, refi_col3 = st.columns(3)
         with refi_col1:
             refi_year1 = st.number_input(
-                "First refinancing (year)", min_value=1, value=4, step=1, key="refi_year1"
+                "First refinancing (year)", min_value=1, value=4, step=1, key="refi_year1", disabled=locked
             )
         with refi_col2:
             refi_year2 = st.number_input(
-                "Second refinancing (year)", min_value=1, value=8, step=1, key="refi_year2"
+                "Second refinancing (year)", min_value=1, value=8, step=1, key="refi_year2", disabled=locked
             )
         with refi_col3:
             releverage_multiple = st.number_input(
                 "Releverage multiple (x next year's EBITDA)", min_value=0.0,
-                value=float(debt_multiple), step=0.5, key="releverage_multiple"
+                value=float(debt_multiple), step=0.5, key="releverage_multiple", disabled=locked
             )
         st.caption(
             f"E.g. with defaults: refinance in year {int(refi_year1)}, releveraging to "
@@ -891,68 +988,94 @@ with tab_financials:
     with c1a:
         contract1_length = st.number_input(
             "Contract 1 length (months)", min_value=1, value=int(horizon_months),
-            step=1, key="contract1_length"
+            step=1, key="contract1_length", disabled=locked
         )
     with c1b:
         st.markdown(f"Rate: vessel TC-rate from Tab 1 ({fmt(monthly_revenue_vessel_base)}/month)")
 
+    def _revenue_for_contracts(contracts_so_far, month):
+        """Same lookup as _get_vessel_revenue below, but against a partial
+        contracts list — used to compute the LTM yardstick using only
+        contracts already known at that point in the form."""
+        contract = contracts_so_far[-1]
+        for c in contracts_so_far:
+            if c["start"] <= month < c["start"] + c["length"]:
+                contract = c
+                break
+        months_into = month - contract["start"] + 1
+        periods = (months_into - 1) // 12
+        factor = (1 + tc_escalator_pct / 100) ** periods
+        return contract["base_monthly"] * factor
+
+    tc_contracts = [{
+        "start": 1, "length": int(contract1_length),
+        "base_monthly": monthly_revenue_vessel_base, "capex_delta": 0.0,
+    }]
+    next_start = int(contract1_length) + 1
+
     contract_renewals = []
     for i in (2, 3, 4):
+        upcoming_start = next_start
+
+        # --- LTM yardstick: last 12 months' vessel TC-revenue, using only
+        #     the contracts already defined up to this renewal ---
+        if upcoming_start > 12:
+            ltm_start_month = upcoming_start - 12
+            ltm_end_month = upcoming_start - 1
+            ltm_total = sum(
+                _revenue_for_contracts(tc_contracts, m)
+                for m in range(ltm_start_month, ltm_end_month + 1)
+            )
+            st.caption(
+                f"📊 **LTM TC-revenue before Contract {i}** (months {ltm_start_month}–{ltm_end_month}): "
+                f"{fmt(ltm_total)} — use this as a yardstick for the new rate."
+            )
+        else:
+            st.caption(
+                f"Not enough history yet for a full LTM figure before Contract {i} "
+                f"(it would start month {upcoming_start})."
+            )
+
         rcol1, rcol2, rcol3 = st.columns(3)
         with rcol1:
             if i < 4:
                 length = st.number_input(
                     f"Contract {i} length (months) — 0 to skip", min_value=0, value=0,
-                    step=1, key=f"contract{i}_length"
+                    step=1, key=f"contract{i}_length", disabled=locked
                 )
             else:
                 length = None  # contract 4 always runs to the end of the horizon
                 st.markdown("Contract 4 runs to the end of the horizon (if reached)")
         with rcol2:
-            new_daily_rate = nok_input(
-                f"Contract {i} new TC-rate (NOK/day)", f"contract{i}_rate_nok",
-                float(vessel_tc_daily), key=f"contract{i}_rate_input"
+            new_annual_rate = nok_input(
+                f"Contract {i} new TC-rate (NOK/year)", f"contract{i}_rate_nok",
+                float(vessel_tc_annual), key=f"contract{i}_rate_input", disabled=locked
             )
         with rcol3:
             capex_delta = nok_input(
                 f"Contract {i} capex adjustment (NOK)", f"contract{i}_capex_delta_nok",
-                0.0, key=f"contract{i}_capex_delta_input"
+                0.0, key=f"contract{i}_capex_delta_input", disabled=locked
             )
-        contract_renewals.append({"length": length, "new_daily_rate": new_daily_rate, "capex_delta": capex_delta})
+        contract_renewals.append({"length": length, "new_annual_rate": new_annual_rate, "capex_delta": capex_delta})
 
-    def _build_contracts():
-        contracts = []
-        start = 1
-        # Contract 1
-        contracts.append({
-            "start": start, "length": int(contract1_length),
-            "base_monthly": monthly_revenue_vessel_base, "capex_delta": 0.0,
-        })
-        start += int(contract1_length)
-        # Contracts 2 & 3 (skippable)
-        for renewal in contract_renewals[:2]:
-            length = int(renewal["length"])
-            if length > 0 and start <= horizon_months:
-                new_annual = renewal["new_daily_rate"] * operating_days
-                new_monthly = new_annual / 12
-                contracts.append({
-                    "start": start, "length": length,
-                    "base_monthly": new_monthly, "capex_delta": renewal["capex_delta"],
+        # extend the known contracts list so the NEXT renewal's LTM sees this one
+        if i < 4:
+            length_int = int(length)
+            if length_int > 0 and upcoming_start <= horizon_months:
+                new_monthly = new_annual_rate / 12
+                tc_contracts.append({
+                    "start": upcoming_start, "length": length_int,
+                    "base_monthly": new_monthly, "capex_delta": capex_delta,
                 })
-                start += length
-        # Contract 4: remainder, if any
-        remaining = horizon_months - (start - 1)
-        if remaining > 0:
-            renewal4 = contract_renewals[2]
-            new_annual = renewal4["new_daily_rate"] * operating_days
-            new_monthly = new_annual / 12
-            contracts.append({
-                "start": start, "length": remaining,
-                "base_monthly": new_monthly, "capex_delta": renewal4["capex_delta"],
-            })
-        return contracts
-
-    tc_contracts = _build_contracts()
+                next_start = upcoming_start + length_int
+        else:
+            remaining = horizon_months - (upcoming_start - 1)
+            if remaining > 0:
+                new_monthly = new_annual_rate / 12
+                tc_contracts.append({
+                    "start": upcoming_start, "length": remaining,
+                    "base_monthly": new_monthly, "capex_delta": capex_delta,
+                })
 
     # Capex adjustment applied exactly once, at each renewal's start month
     # (contract 1 never has one — it's the vessel's original capex).
@@ -963,15 +1086,7 @@ with tab_financials:
     def _get_vessel_revenue(month):
         """Base monthly TC-revenue for this month's active contract, escalated
         from that contract's own start (first adjustment 12 months in)."""
-        contract = tc_contracts[-1]
-        for c in tc_contracts:
-            if c["start"] <= month < c["start"] + c["length"]:
-                contract = c
-                break
-        months_into_contract = month - contract["start"] + 1
-        periods = (months_into_contract - 1) // 12
-        factor = (1 + tc_escalator_pct / 100) ** periods
-        return contract["base_monthly"] * factor
+        return _revenue_for_contracts(tc_contracts, month)
 
     if len(tc_contracts) > 1:
         st.markdown("**Contract summary** (annualized rate, and uplift vs. the TC-rate just before renewal)")
@@ -1314,7 +1429,7 @@ with tab_investment:
 
     terminal_multiple = st.number_input(
         "Terminal EBITDA multiple (x forward EBITDA)", min_value=0.0, value=10.0,
-        step=0.5, key="terminal_multiple"
+        step=0.5, key="terminal_multiple", disabled=locked
     )
 
     def _project_ebitda_month(month):
@@ -1496,3 +1611,5 @@ st.download_button(
     file_name="tc_rate_model.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
+
+
