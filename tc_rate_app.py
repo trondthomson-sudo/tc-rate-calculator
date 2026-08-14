@@ -39,25 +39,48 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 
 CONFIG_FILE = "default_config.json"
-CONFIG_EXCLUDE_KEYS = {"unlocked", "unlock_password_input", "_config_loaded"}
+CONFIG_EXCLUDE_KEYS = {"unlocked", "unlock_password_input", "_config_loaded", "_config_status", "config_uploader"}
+
+
+def _is_excluded_key(key: str) -> bool:
+    """Buttons (like the opex '✕' remove buttons) can't have their
+    session_state pre-set — Streamlit raises an error if you try. File
+    uploader keys shouldn't be restored either. Exclude both, everywhere."""
+    if key in CONFIG_EXCLUDE_KEYS:
+        return True
+    if key.startswith("remove_"):
+        return True
+    return False
 
 
 def _apply_config(config_dict):
     for k, v in config_dict.items():
-        if k not in CONFIG_EXCLUDE_KEYS:
+        if _is_excluded_key(k):
+            continue
+        try:
             st.session_state[k] = v
+        except Exception:
+            pass  # skip any single key Streamlit won't allow, rather than crash the whole app
 
 
+_config_status = None
 if "_config_loaded" not in st.session_state:
     st.session_state["_config_loaded"] = True
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 _apply_config(json.load(f))
-        except Exception:
-            pass  # fall back to the code's built-in defaults if the file is missing/corrupt
+            _config_status = f"✅ Loaded {CONFIG_FILE} ({os.path.getsize(CONFIG_FILE)} bytes) from {os.path.abspath(CONFIG_FILE)}"
+        except Exception as e:
+            _config_status = f"❌ Found {CONFIG_FILE} but failed to load it: {e}"
+    else:
+        _config_status = f"⚠️ {CONFIG_FILE} not found at {os.path.abspath(CONFIG_FILE)} (cwd: {os.getcwd()})"
+    st.session_state["_config_status"] = _config_status
 
 st.title("⚓ TC-rate calculator — live fish carrier")
+
+if st.session_state.get("_config_status"):
+    st.caption(f"Config status: {st.session_state['_config_status']}")
 st.caption(
     "Vessel TC-rate, leased equipment financing, and the combined total — "
     "all on a daily / monthly / annual basis."
@@ -103,7 +126,7 @@ with st.sidebar:
             "(including in locked view-only mode)."
         )
 
-        config_to_save = {k: v for k, v in dict(st.session_state).items() if k not in CONFIG_EXCLUDE_KEYS}
+        config_to_save = {k: v for k, v in dict(st.session_state).items() if not _is_excluded_key(k)}
         config_json = json.dumps(config_to_save, default=str, indent=2)
         st.download_button(
             "Save current inputs as default",
@@ -555,6 +578,11 @@ with tab_lease:
             "Customer lease is currently **off**. Turn it on to add the "
             "equipment's lease payment to the Combined TC-rate. Inputs below "
             "are still editable so it's ready whenever you switch it on."
+        )
+        st.caption(
+            f"🔍 Debug: widget returned lease_enabled={lease_enabled} · "
+            f"session_state['lease_enabled']={st.session_state.get('lease_enabled')} · "
+            f"config status={st.session_state.get('_config_status', 'n/a')}"
         )
 
     left, right = st.columns([1, 1.4], gap="large")
