@@ -263,20 +263,24 @@ def formatted_line_chart(df: pd.DataFrame, x_col: str, y_cols: list, height: int
 
 
 def formatted_bar_chart(df: pd.DataFrame, category_col: str, value_col: str, height: int = 300):
-    """Horizontal bar chart with comma-separated axis labels and tooltips."""
-    chart = (
-        alt.Chart(df.reset_index())
-        .mark_bar()
-        .encode(
-            y=alt.Y(f"{category_col}:N", title=None, sort=None),
-            x=alt.X(f"{value_col}:Q", title=None, axis=alt.Axis(format=NOK_AXIS_FORMAT)),
-            tooltip=[
-                alt.Tooltip(f"{category_col}:N", title=category_col),
-                alt.Tooltip(f"{value_col}:Q", title=value_col, format=NOK_AXIS_FORMAT),
-            ],
-        )
-        .properties(height=height)
+    """Horizontal bar chart with comma-separated axis labels, tooltips, and
+    a value label printed on each bar (space-thousands, matching the rest
+    of the app's number formatting)."""
+    plot_df = df.reset_index()
+    plot_df["_label"] = plot_df[value_col].apply(format_nok)
+
+    base = alt.Chart(plot_df).encode(
+        y=alt.Y(f"{category_col}:N", title=None, sort=None),
+        x=alt.X(f"{value_col}:Q", title=None, axis=alt.Axis(format=NOK_AXIS_FORMAT)),
     )
+    bars = base.mark_bar().encode(
+        tooltip=[
+            alt.Tooltip(f"{category_col}:N", title=category_col),
+            alt.Tooltip(f"{value_col}:Q", title=value_col, format=NOK_AXIS_FORMAT),
+        ],
+    )
+    labels = base.mark_text(align="left", dx=5, color="black").encode(text="_label:N")
+    chart = (bars + labels).properties(height=height)
     st.altair_chart(chart, use_container_width=True)
 
 
@@ -290,35 +294,46 @@ def annuity_monthly_payment(principal_nok: float, annual_rate_pct: float, num_mo
     return principal_nok * r / (1 - (1 + r) ** -num_months)
 
 
-def amortization_balances(principal_nok: float, annual_rate_pct: float, num_months: int) -> list:
-    """Closing balance for each month (used to chart the paydown)."""
+def amortization_balances(principal_nok: float, annual_rate_pct: float, num_months: int, payment_basis_months: int = None) -> list:
+    """Closing balance for each month (used to chart the paydown).
+
+    If payment_basis_months is given and differs from num_months, the level
+    payment is computed over the LONGER payback basis, but the schedule
+    only runs for num_months — leaving a genuine, non-zero residual
+    balance at the end (e.g. a lease rental priced on a 7-year payback but
+    only actually collected over a 5-year customer contract)."""
+    basis_months = payment_basis_months if payment_basis_months else num_months
     r = (annual_rate_pct / 100) / 12
-    payment = annuity_monthly_payment(principal_nok, annual_rate_pct, num_months)
+    payment = annuity_monthly_payment(principal_nok, annual_rate_pct, basis_months)
     balance = principal_nok
     balances = []
     for month in range(1, num_months + 1):
         interest = balance * r
         principal_paid = payment - interest
         balance = balance - principal_paid
-        if month == num_months:
-            balance = 0.0
+        if month == num_months and basis_months == num_months:
+            balance = 0.0  # only force to zero when the schedule fully amortizes within num_months
         balances.append(balance)
     return balances
 
 
-def amortization_schedule_full(principal_nok: float, annual_rate_pct: float, num_months: int) -> list:
+def amortization_schedule_full(principal_nok: float, annual_rate_pct: float, num_months: int, payment_basis_months: int = None) -> list:
     """Month-by-month: opening balance, payment, finance cost (interest),
-    amortization (principal), closing balance."""
+    amortization (principal), closing balance.
+
+    Same payment_basis_months mechanic as amortization_balances() above —
+    see that docstring."""
+    basis_months = payment_basis_months if payment_basis_months else num_months
     r = (annual_rate_pct / 100) / 12
-    payment = annuity_monthly_payment(principal_nok, annual_rate_pct, num_months)
+    payment = annuity_monthly_payment(principal_nok, annual_rate_pct, basis_months)
     balance = principal_nok
     rows = []
     for month in range(1, num_months + 1):
         interest = balance * r
         principal_paid = payment - interest
         closing = balance - principal_paid
-        if month == num_months:
-            closing = 0.0
+        if month == num_months and basis_months == num_months:
+            closing = 0.0  # only force to zero when the schedule fully amortizes within num_months
         rows.append({
             "Month": month,
             "Opening balance": balance,
@@ -361,8 +376,8 @@ def _on_opex_value_change(index):
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_vessel, tab_lease, tab_combined, tab_financials, tab_investment, tab_summary = st.tabs(
-    ["Vessel TC-rate", "Lease spread", "Combined TC-rate", "Financial Statements", "Investment Analysis", "Summary"]
+tab_vessel, tab_spot, tab_lease, tab_combined, tab_financials, tab_investment, tab_summary = st.tabs(
+    ["Vessel TC-rate", "Spot market", "Lease spread", "Combined TC-rate", "Financial Statements", "Investment Analysis", "Summary"]
 )
 
 # ===========================================================================
@@ -712,6 +727,638 @@ with tab_vessel:
         )
 
 # ===========================================================================
+# TAB 1b — Spot market (alternative revenue basis, with transparent
+#          voyage cost recovery)
+# ===========================================================================
+with tab_spot:
+    st.subheader("Spot market revenue")
+    st.caption(
+        "An alternative to the TC-rate above: revenue is a market day-rate "
+        "for vessel capacity, plus separate charge lines that recover "
+        "voyage costs (fuel, lube oil, port fees, waste, farledsavgift, pH "
+        "adjustment) from the customer — shown transparently against what "
+        "each actually costs. Unlike a TC charter, these voyage costs sit "
+        "for the **owner's** account, not the charterer's, which is why "
+        "they need to be billed back explicitly rather than assumed away."
+    )
+
+    spot_market_enabled = stateful_toggle(
+        "Use spot-market revenue instead of the TC-rate in the Financial Statements",
+        value=False, key="spot_market_enabled", disabled=locked
+    )
+    if not spot_market_enabled:
+        st.info(
+            "Spot market is currently **off** — the Financial Statements tab "
+            "still uses the vessel TC-rate (Tab 1). Inputs below are still "
+            "editable so this is ready whenever you switch it on."
+        )
+
+    st.markdown("**Utilization & service mix**")
+    st.caption(
+        "Not every calendar day earns revenue — utilization sets what share "
+        "of operating days are actually working. Of those working days, the "
+        "service mix splits them across job types (treatment, smolt "
+        "transport, harvest transport, etc.), each at its own day-rate. "
+        "Vessel opex (crewing — Tab 1) is unaffected by utilization, since "
+        "crew cost doesn't stop during idle days; voyage costs below scale "
+        "with utilization the same way revenue does, since idle days don't "
+        "burn fuel or incur port fees either."
+    )
+
+    st.markdown("**Service mix** (days working per year, by service type)")
+    st.caption(
+        "Utilization is derived from these day counts (sum of days ÷ "
+        "operating days), rather than being set separately — so it can't "
+        "drift out of sync with the mix below."
+    )
+
+    if "spot_service_items" not in st.session_state:
+        st.session_state.spot_service_items = [
+            {"name": "Treatment of fish", "days_per_year": 166.0, "rate_nok_day": 732_000.0, "escalator_pct": 0.0, "priced_at_baseline": False},
+            {"name": "Smolt transport", "days_per_year": 47.0, "rate_nok_day": 0.0, "escalator_pct": 0.0, "priced_at_baseline": True},
+            {"name": "Harvest transport", "days_per_year": 24.0, "rate_nok_day": 0.0, "escalator_pct": 0.0, "priced_at_baseline": True},
+        ]
+
+    st.markdown("**Vessel opex (annual budget, spread over working days)**")
+    st.caption(
+        "Unlike Tab 1's crewing/vessel opex — which is fixed and applies "
+        "every calendar day, since crew salaries don't stop when idle — "
+        "this treats vessel opex as a fixed **annual** budget that gets "
+        "spread over however many days are actually worked. Change the "
+        "annual figure, or change utilization (which changes working "
+        "days), and the resulting day-rate updates automatically either "
+        "way — it's the day-rate that's derived, not the annual figure. "
+        "While spot mode is active, this **replaces** Tab 1's opex for "
+        "the vessel's P&L (Tab 1's own figures stay as they are, for the "
+        "TC-mode scenario)."
+    )
+    spot_opex_annual_nok = nok_input(
+        "Vessel opex (NOK/year, total)", "spot_opex_annual_nok", 30_000_000.0,
+        key="spot_opex_annual_input", disabled=locked
+    )
+    spot_opex_escalator_pct = stateful_number_input(
+        "Vessel opex escalator (%/yr)", min_value=-100.0, value=3.0, step=0.5,
+        key="spot_opex_escalator", disabled=locked
+    )
+    _provisional_working_days_for_opex = sum(
+        item.get("days_per_year", 0.0) for item in st.session_state.spot_service_items
+    )
+    spot_opex_rate_nok_day = (
+        spot_opex_annual_nok / _provisional_working_days_for_opex if _provisional_working_days_for_opex else 0.0
+    )
+    st.metric(
+        "Implied day-rate (derived)",
+        fmt(spot_opex_rate_nok_day) + "/day",
+        help=f"{fmt(spot_opex_annual_nok)}/year ÷ {fmt(_provisional_working_days_for_opex)} working days/year."
+    )
+
+    # --- baseline reference: the COMBINED TC-rate (vessel + leased
+    # equipment, e.g. the FLS equipment lease) — not vessel-only. Tab 3
+    # (Combined TC-rate) computes this but runs AFTER this tab in script
+    # order, so it's read one pass behind via session state (same
+    # convention used elsewhere in this app, e.g. Tab 1's Sources & Uses
+    # guideline). Falls back to vessel-only on the very first load, before
+    # Tab 3 has run even once. ---
+    spot_baseline_tc_daily = st.session_state.get("_combined_tc_daily", vessel_tc_daily)
+
+    # Utilization here is provisional (based on session-state day counts as
+    # they stood at the end of the previous pass) so the required rate can
+    # be shown before the table below has finished re-rendering this pass.
+    _provisional_working_days = sum(
+        item.get("days_per_year", 0.0) for item in st.session_state.spot_service_items
+    )
+    _provisional_utilization_pct = (_provisional_working_days / operating_days * 100) if operating_days else 0.0
+    # This is the required NET income per working day — i.e. after vessel
+    # opex, matching the TC-equivalent annual return. Gross price (what's
+    # actually billed) = this net target + vessel opex.
+    required_net_rate_at_utilization = (
+        spot_baseline_tc_daily / (_provisional_utilization_pct / 100) if _provisional_utilization_pct > 0 else 0.0
+    )
+    required_gross_rate_at_utilization = required_net_rate_at_utilization + spot_opex_rate_nok_day
+
+    st.markdown("**Baseline reference** (imported live from the Combined TC-rate, Tab 3 — vessel + leased equipment)")
+    bl1, bl2, bl3, bl4 = st.columns(4)
+    bl1.metric("Baseline TC-rate (vessel + equipment)", fmt(spot_baseline_tc_daily) + "/day")
+    bl2.metric("Utilization (from day counts below)", f"{_provisional_utilization_pct:.1f}%")
+    bl3.metric("Required NET rate on working days", fmt(required_net_rate_at_utilization) + "/day")
+    bl4.metric("Required GROSS price (net + vessel opex)", fmt(required_gross_rate_at_utilization) + "/day")
+    st.caption(
+        f"= {fmt(vessel_tc_daily)}/day vessel (Tab 1) + "
+        f"{fmt(spot_baseline_tc_daily - vessel_tc_daily)}/day leased equipment "
+        f"(Tab 2/3, e.g. FLS). Required NET rate = baseline ÷ utilization — "
+        f"the net income a job type needs to earn, on the days it's "
+        f"actually working, to match the TC-equivalent annual revenue. "
+        f"Required GROSS price = that net target + vessel opex "
+        f"({fmt(spot_opex_rate_nok_day)}/day) — this is the day-rate "
+        f"actually billed. Services flagged 'priced at baseline' below are "
+        f"simply assumed to bill at this gross price exactly (no "
+        f"price-list build-up on top) — a simplifying assumption for "
+        f"segments that aren't the focus of the pricing work. This figure "
+        f"is one script pass behind Tab 3 — switch tabs once after editing "
+        f"lease inputs for it to catch up."
+    )
+
+    def _add_service_item():
+        st.session_state.spot_service_items.append(
+            {"name": "New service", "days_per_year": 0.0, "rate_nok_day": 0.0, "escalator_pct": 0.0, "priced_at_baseline": False}
+        )
+
+    def _remove_service_item(index):
+        st.session_state.spot_service_items.pop(index)
+
+    def _on_service_rate_change(index):
+        raw = st.session_state[f"service_rate_{index}"]
+        value = parse_nok(raw)
+        st.session_state.spot_service_items[index]["rate_nok_day"] = value
+        st.session_state[f"service_rate_{index}"] = format_nok(value)
+
+    shdr1, shdr2, shdr3, shdr4, shdr5, shdr6, shdr7 = st.columns([1.7, 0.9, 0.8, 1.1, 1.1, 1.3, 0.4])
+    shdr1.markdown("**Service**")
+    shdr2.markdown("**Days/year**")
+    shdr3.markdown("**% of year**")
+    shdr4.markdown("**Priced at baseline?**")
+    shdr5.markdown("**Rate (NOK/day)**")
+    shdr6.markdown("**Annual revenue (NOK)**")
+
+    _sum_days = 0.0
+    _sum_annual_revenue = 0.0
+
+    for i, item in enumerate(st.session_state.spot_service_items):
+        item.setdefault("priced_at_baseline", False)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([1.7, 0.9, 0.8, 1.1, 1.1, 1.3, 0.4])
+        with c1:
+            item["name"] = st.text_input(
+                "Service", value=item["name"], key=f"service_name_{i}", label_visibility="collapsed",
+                disabled=locked
+            )
+        with c2:
+            item["days_per_year"] = st.number_input(
+                "Days/year", min_value=0.0, max_value=366.0, value=item["days_per_year"], step=1.0,
+                key=f"service_days_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c3:
+            _pct_of_year = (item["days_per_year"] / operating_days * 100) if operating_days else 0.0
+            st.markdown(f"<div style='padding-top:8px'>{_pct_of_year:.1f}%</div>", unsafe_allow_html=True)
+        with c4:
+            item["priced_at_baseline"] = st.checkbox(
+                "Priced at baseline?", value=item["priced_at_baseline"],
+                key=f"service_baseline_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c5:
+            if item["priced_at_baseline"]:
+                _row_rate = required_gross_rate_at_utilization
+                st.text_input(
+                    "Rate (NOK/day)", value=format_nok(_row_rate),
+                    key=f"service_rate_display_{i}", label_visibility="collapsed", disabled=True
+                )
+            else:
+                _row_rate = item["rate_nok_day"]
+                if f"service_rate_{i}" not in st.session_state:
+                    st.session_state[f"service_rate_{i}"] = format_nok(item["rate_nok_day"])
+                st.text_input(
+                    "Rate (NOK/day)", key=f"service_rate_{i}", label_visibility="collapsed",
+                    on_change=_on_service_rate_change, args=(i,), disabled=locked
+                )
+        with c6:
+            _row_annual_revenue = _row_rate * item["days_per_year"]
+            st.markdown(f"<div style='padding-top:8px'>{fmt(_row_annual_revenue)}</div>", unsafe_allow_html=True)
+        with c7:
+            st.button("✕", key=f"service_remove_{i}", on_click=_remove_service_item, args=(i,), disabled=locked)
+
+        _sum_days += item["days_per_year"]
+        _sum_annual_revenue += _row_annual_revenue
+
+    st.button("+ Add service", on_click=_add_service_item, disabled=locked)
+
+    _sum_pct_of_year = (_sum_days / operating_days * 100) if operating_days else 0.0
+    tcol1, tcol2, tcol3, tcol4 = st.columns([2.6, 0.9, 0.8, 2.4])
+    tcol1.markdown("**Total**")
+    tcol2.markdown(f"**{fmt(_sum_days)}**")
+    tcol3.markdown(f"**{_sum_pct_of_year:.1f}%**")
+    tcol4.markdown(f"**{fmt(_sum_annual_revenue)}** (revenue only, excl. opex and price-list build-up)")
+
+    _target_net_annual = spot_baseline_tc_daily * operating_days
+    _target_gross_annual = _target_net_annual + spot_opex_annual_nok
+    _target_delta = _sum_annual_revenue - _target_gross_annual
+    st.caption(
+        f"Target: {fmt(_target_net_annual)} net (baseline TC-rate x operating days) + "
+        f"{fmt(spot_opex_annual_nok)} opex = **{fmt(_target_gross_annual)}** gross required. "
+        f"Current total above: {fmt(_sum_annual_revenue)} "
+        f"({'+' if _target_delta >= 0 else ''}{fmt(_target_delta)} vs. target). "
+        f"Note: the total here excludes each service's own price-list build-up (Treatment's "
+        f"UV/med/FW prod etc.) — see 'Combined rate by service' further down for the fully "
+        f"loaded figure including that."
+    )
+
+    spot_service_items_current = [
+        {
+            "name": item["name"],
+            "days_per_year": item["days_per_year"],
+            "rate_nok_day": item["rate_nok_day"],
+            "escalator_pct": item.get("escalator_pct", 0.0),
+            "priced_at_baseline": item.get("priced_at_baseline", False),
+        }
+        for item in st.session_state.spot_service_items
+    ]
+
+    _working_days_annual = sum(item["days_per_year"] for item in spot_service_items_current)
+    spot_utilization_pct = (_working_days_annual / operating_days * 100) if operating_days else 0.0
+
+    if _working_days_annual > operating_days:
+        st.warning(
+            f"⚠️ Days working ({fmt(_working_days_annual)}) exceed operating "
+            f"days ({fmt(operating_days)}, Tab 1) — utilization would be over "
+            f"100%. Check the day counts below."
+        )
+
+    st.metric(
+        "Utilization (derived)",
+        f"{spot_utilization_pct:.1f}%",
+        help=f"{fmt(_working_days_annual)} working days/year, out of {fmt(operating_days)} operating days (Tab 1)."
+    )
+
+    st.markdown("**Utilization scenario — quick adjust**")
+    st.caption(
+        "For 'what if utilization were X%' testing: set a target below and "
+        "apply it to rescale all three day counts up or down, keeping the "
+        "Treatment/Smolt/Harvest mix (their relative shares) unchanged. "
+        "This overwrites the day counts in the table above — edit them "
+        "directly instead if you want to change the mix itself, not just "
+        "the overall level."
+    )
+    util_col1, util_col2 = st.columns([1, 1])
+    with util_col1:
+        target_utilization_pct = stateful_number_input(
+            "Target utilization (%)", min_value=0.0, max_value=100.0,
+            value=round(spot_utilization_pct, 1), step=1.0,
+            key="spot_target_utilization", disabled=locked
+        )
+    with util_col2:
+        st.markdown("&nbsp;")  # vertical spacer to align button with the input above
+        if st.button("Apply — rescale days to this utilization", disabled=locked):
+            _target_working_days = operating_days * (target_utilization_pct / 100)
+            if _working_days_annual > 0:
+                _scale = _target_working_days / _working_days_annual
+                for item in st.session_state.spot_service_items:
+                    item["days_per_year"] = round(item["days_per_year"] * _scale, 1)
+                st.rerun()
+            else:
+                st.warning("Can't rescale from zero total days — set some days per service first.")
+
+    st.markdown("**Price list** (itemized charges, on top of the Service mix rate above)")
+    st.caption(
+        "Combines additively with the Service mix rate: for each service "
+        "type, the price-list contribution = sum of (rate x assumed "
+        "quantity/day) across items, added to that service's manual rate "
+        "above. Set a quantity to 0 for items that don't apply to a given "
+        "service type."
+    )
+
+    if "spot_price_items" not in st.session_state:
+        _n_services_default = len(st.session_state.get("spot_service_items", spot_service_items_current))
+        st.session_state.spot_price_items = [
+            {"name": "Base", "unit": "hr", "rate": 18_000.0, "qty_per_day": [24.0] * _n_services_default},
+            {"name": "Washing/disinfection", "unit": "use", "rate": 25_000.0, "qty_per_day": [1.0, 0.0, 0.0][:_n_services_default] + [0.0] * max(0, _n_services_default - 3)},
+            # UV: calibrated from the colleague's sheet — applies only during
+            # "Steaming (loaded)" hours, not the full day. Smolt: 18.75 hr of
+            # a 51.82-hr cycle -> 8.68 hr/day equivalent. Harvest: 112.5 hr
+            # of a 253.93-hr cycle -> 10.63 hr/day equivalent.
+            {"name": "UV - smolt/harvest", "unit": "hr", "rate": 1_000.0, "qty_per_day": [0.0, 8.6827, 10.6327][:_n_services_default] + [0.0] * max(0, _n_services_default - 3)},
+            {"name": "RSW", "unit": "hr", "rate": 0.0, "qty_per_day": [0.0] * _n_services_default},
+            {"name": "FLS", "unit": "ton", "rate": 450.0, "qty_per_day": [0.0, 0.0, 0.0][:_n_services_default] + [0.0] * max(0, _n_services_default - 3)},
+            {"name": "FW treat extra (incl UV)", "unit": "hr", "rate": 2_000.0, "qty_per_day": [4.0, 0.0, 0.0][:_n_services_default] + [0.0] * max(0, _n_services_default - 3)},
+            {"name": "med", "unit": "hr", "rate": 2_000.0, "qty_per_day": [2.0, 0.0, 0.0][:_n_services_default] + [0.0] * max(0, _n_services_default - 3)},
+            {"name": "FW prod", "unit": "m3", "rate": 20.0, "qty_per_day": [100.0, 0.0, 0.0][:_n_services_default] + [0.0] * max(0, _n_services_default - 3)},
+        ]
+
+    def _add_price_item():
+        st.session_state.spot_price_items.append(
+            {"name": "New item", "unit": "hr", "rate": 0.0, "qty_per_day": [0.0] * len(spot_service_items_current)}
+        )
+
+    def _remove_price_item(index):
+        st.session_state.spot_price_items.pop(index)
+
+    def _on_price_rate_change(index):
+        raw = st.session_state[f"price_rate_{index}"]
+        value = parse_nok(raw)
+        st.session_state.spot_price_items[index]["rate"] = value
+        st.session_state[f"price_rate_{index}"] = format_nok(value)
+
+    n_services = len(spot_service_items_current)
+    service_names = [item["name"] for item in spot_service_items_current]
+
+    phdr = st.columns([1.8, 0.6, 1.1] + [1.0] * n_services + [0.4])
+    phdr[0].markdown("**Item**")
+    phdr[1].markdown("**Unit**")
+    phdr[2].markdown("**Rate (NOK/unit)**")
+    for s_idx, s_name in enumerate(service_names):
+        phdr[3 + s_idx].markdown(f"**{s_name} — qty/day**")
+
+    for i, item in enumerate(st.session_state.spot_price_items):
+        # keep qty_per_day length in sync with the current number of
+        # services, defensively, in case a service was added/removed
+        # on the Service mix table above since this was last edited
+        qpd = item.setdefault("qty_per_day", [])
+        if len(qpd) < n_services:
+            qpd.extend([0.0] * (n_services - len(qpd)))
+        elif len(qpd) > n_services:
+            del qpd[n_services:]
+
+        cols = st.columns([1.8, 0.6, 1.1] + [1.0] * n_services + [0.4])
+        with cols[0]:
+            item["name"] = st.text_input(
+                "Item", value=item["name"], key=f"price_name_{i}", label_visibility="collapsed",
+                disabled=locked
+            )
+        with cols[1]:
+            item["unit"] = st.text_input(
+                "Unit", value=item["unit"], key=f"price_unit_{i}", label_visibility="collapsed",
+                disabled=locked
+            )
+        with cols[2]:
+            if f"price_rate_{i}" not in st.session_state:
+                st.session_state[f"price_rate_{i}"] = format_nok(item["rate"])
+            st.text_input(
+                "Rate", key=f"price_rate_{i}", label_visibility="collapsed",
+                on_change=_on_price_rate_change, args=(i,), disabled=locked
+            )
+        for s_idx in range(n_services):
+            with cols[3 + s_idx]:
+                item["qty_per_day"][s_idx] = st.number_input(
+                    "Qty/day", min_value=0.0, value=item["qty_per_day"][s_idx], step=1.0,
+                    key=f"price_qty_{i}_{s_idx}", label_visibility="collapsed", disabled=locked
+                )
+        with cols[3 + n_services]:
+            st.button("✕", key=f"price_remove_{i}", on_click=_remove_price_item, args=(i,), disabled=locked)
+
+    st.button("+ Add price list item", on_click=_add_price_item, disabled=locked)
+
+    spot_price_items_current = [
+        {
+            "name": item["name"],
+            "unit": item["unit"],
+            "rate": item["rate"],
+            "qty_per_day": list(item["qty_per_day"]),
+        }
+        for item in st.session_state.spot_price_items
+    ]
+
+    # price-list-derived day-rate contribution, per service (by position)
+    price_list_day_rate_by_service = [
+        sum(item["rate"] * item["qty_per_day"][s_idx] for item in spot_price_items_current)
+        for s_idx in range(n_services)
+    ]
+
+    # Recompute the required rate using this pass's actual (not provisional)
+    # utilization, now that the table above has finished rendering — used
+    # below to price any 'priced at baseline' items.
+    spot_utilization_pct_final = (_working_days_annual / operating_days * 100) if operating_days else 0.0
+    required_net_rate_at_utilization_final = (
+        spot_baseline_tc_daily / (spot_utilization_pct_final / 100) if spot_utilization_pct_final > 0 else 0.0
+    )
+    # Same re-derivation for the opex day-rate, now using the final working
+    # days count rather than the provisional one from before the table
+    # rendered — keeps this pass's numbers fully self-consistent.
+    spot_opex_rate_nok_day_final = (
+        spot_opex_annual_nok / _working_days_annual if _working_days_annual else 0.0
+    )
+    required_gross_rate_at_utilization_final = required_net_rate_at_utilization_final + spot_opex_rate_nok_day_final
+
+    st.markdown("**Combined rate by service** (Service mix rate + price-list build-up)")
+    combined_rows = []
+    for s_idx, item in enumerate(spot_service_items_current):
+        if item["priced_at_baseline"]:
+            manual_rate = required_gross_rate_at_utilization_final  # net target + vessel opex
+            price_list_contribution = 0.0  # suppressed — priced at baseline instead
+        else:
+            manual_rate = item["rate_nok_day"]
+            price_list_contribution = price_list_day_rate_by_service[s_idx]
+        combined_rate = manual_rate + price_list_contribution
+        combined_rows.append({
+            "Service": item["name"],
+            "Days/year": item["days_per_year"],
+            "Priced at baseline?": "Yes" if item["priced_at_baseline"] else "No",
+            "Manual rate (NOK/day)": manual_rate,
+            "Price-list build-up (NOK/day)": price_list_contribution,
+            "Combined rate (NOK/day)": combined_rate,
+            "Annual revenue (NOK)": combined_rate * item["days_per_year"],
+        })
+    combined_rate_df = pd.DataFrame(combined_rows)
+    show_table(combined_rate_df, "Service", width="stretch")
+
+    _total_spot_annual_revenue = sum(r["Annual revenue (NOK)"] for r in combined_rows)
+    _blended_day_rate = (
+        _total_spot_annual_revenue / _working_days_annual if _working_days_annual else 0.0
+    )
+    spot_base_rate_nok_day = _blended_day_rate  # blended, working-day basis (kept for display/backward compatibility)
+
+    bd1, bd2 = st.columns(2)
+    bd1.metric("Blended day-rate (days-weighted average)", fmt(_blended_day_rate) + "/day")
+    bd2.metric("Total annual revenue (before voyage costs)", fmt(_total_spot_annual_revenue))
+
+    st.markdown("**Voyage costs & recovery**")
+    st.caption(
+        "Each item now varies by service — mirroring the Price list above — "
+        "since fuel/lube burn differs materially between a treatment day, "
+        "a smolt run, and a harvest run. Recovery % (what % of that cost "
+        "is billed back to the customer) still applies per item, uniformly "
+        "across services: 100% = billed straight through, no margin; "
+        "below 100% = owner absorbs part of it; above 100% = owner earns "
+        "a margin on the pass-through."
+    )
+
+    if "spot_cost_items" not in st.session_state:
+        _n_services_default = len(st.session_state.get("spot_service_items", spot_service_items_current))
+        # Fuel and Lube are calibrated per service using the fuel-burn
+        # physics reverse-engineered from the colleague's spreadsheet
+        # (~10 NOK/L, cycle fuel ÷ cycle length in days, applied to each
+        # service's own working days) — a starting estimate, not exact;
+        # adjust directly to hit a specific annual target. Other items
+        # default to the same flat rate across all services, as before.
+        st.session_state.spot_cost_items = [
+            {"name": "Fuel", "unit": "day", "recovery_pct": 100.0, "escalator_pct": 3.0,
+             "cost_nok_day": [25_000.0, 92_000.0, 99_000.0][:_n_services_default] + [25_000.0] * max(0, _n_services_default - 3)},
+            {"name": "Lubrication oil", "unit": "day", "recovery_pct": 100.0, "escalator_pct": 2.0,
+             "cost_nok_day": [2_000.0, 9_000.0, 10_000.0][:_n_services_default] + [2_000.0] * max(0, _n_services_default - 3)},
+            {"name": "Port fees", "unit": "day", "recovery_pct": 100.0, "escalator_pct": 2.0,
+             "cost_nok_day": [4_000.0] * _n_services_default},
+            {"name": "Waste", "unit": "day", "recovery_pct": 100.0, "escalator_pct": 2.0,
+             "cost_nok_day": [1_000.0] * _n_services_default},
+            {"name": "Farledsavgift", "unit": "day", "recovery_pct": 100.0, "escalator_pct": 2.0,
+             "cost_nok_day": [1_500.0] * _n_services_default},
+            {"name": "pH adjustment (water treatment)", "unit": "day", "recovery_pct": 100.0, "escalator_pct": 2.0,
+             "cost_nok_day": [3_000.0] * _n_services_default},
+        ]
+
+    def _add_spot_item():
+        st.session_state.spot_cost_items.append(
+            {"name": "New item", "unit": "day", "recovery_pct": 100.0, "escalator_pct": 2.0,
+             "cost_nok_day": [0.0] * len(spot_service_items_current)}
+        )
+
+    def _remove_spot_item(index):
+        st.session_state.spot_cost_items.pop(index)
+
+    def _on_spot_cost_change(index, s_idx):
+        raw = st.session_state[f"spot_cost_{index}_{s_idx}"]
+        value = parse_nok(raw)
+        st.session_state.spot_cost_items[index]["cost_nok_day"][s_idx] = value
+        st.session_state[f"spot_cost_{index}_{s_idx}"] = format_nok(value)
+
+    chdr = st.columns([1.8, 1.0] + [1.0] * n_services + [0.4])
+    chdr[0].markdown("**Item**")
+    chdr[1].markdown("**Recovery %**")
+    for s_idx, s_name in enumerate(service_names):
+        chdr[2 + s_idx].markdown(f"**{s_name} — NOK/day**")
+
+    for i, item in enumerate(st.session_state.spot_cost_items):
+        # keep cost_nok_day length in sync with the current number of
+        # services, defensively, same pattern as the Price list above
+        cpd = item.setdefault("cost_nok_day", [])
+        if len(cpd) < n_services:
+            cpd.extend([0.0] * (n_services - len(cpd)))
+        elif len(cpd) > n_services:
+            del cpd[n_services:]
+
+        cols = st.columns([1.8, 1.0] + [1.0] * n_services + [0.4])
+        with cols[0]:
+            item["name"] = st.text_input(
+                "Name", value=item["name"], key=f"spot_name_{i}", label_visibility="collapsed",
+                disabled=locked
+            )
+        with cols[1]:
+            item["recovery_pct"] = st.number_input(
+                "Recovery %", min_value=0.0, value=item["recovery_pct"], step=5.0,
+                key=f"spot_recovery_{i}", label_visibility="collapsed", disabled=locked
+            )
+        for s_idx in range(n_services):
+            with cols[2 + s_idx]:
+                if f"spot_cost_{i}_{s_idx}" not in st.session_state:
+                    st.session_state[f"spot_cost_{i}_{s_idx}"] = format_nok(item["cost_nok_day"][s_idx])
+                st.text_input(
+                    "Cost (NOK/day)", key=f"spot_cost_{i}_{s_idx}", label_visibility="collapsed",
+                    on_change=_on_spot_cost_change, args=(i, s_idx), disabled=locked
+                )
+        with cols[2 + n_services]:
+            st.button("✕", key=f"spot_remove_{i}", on_click=_remove_spot_item, args=(i,), disabled=locked)
+
+    st.button("+ Add voyage cost item", on_click=_add_spot_item, disabled=locked)
+
+    spot_cost_items_current = [
+        {
+            "name": item["name"],
+            "cost_nok_day": list(item["cost_nok_day"]),
+            "recovery_pct": item["recovery_pct"],
+            "escalator_pct": item.get("escalator_pct", 2.0),
+        }
+        for item in st.session_state.spot_cost_items
+    ]
+
+    # --- reconciliation: Fuel + Lube, for Smolt + Harvest specifically ---
+    _fuel_lube_names = {"Fuel", "Lubrication oil"}
+    _fl_annual_by_service = [0.0] * n_services
+    for item in spot_cost_items_current:
+        if item["name"] in _fuel_lube_names:
+            for s_idx, svc in enumerate(spot_service_items_current):
+                _fl_annual_by_service[s_idx] += item["cost_nok_day"][s_idx] * svc["days_per_year"]
+    _fl_total_ex_treatment = sum(
+        v for s_idx, v in enumerate(_fl_annual_by_service)
+        if spot_service_items_current[s_idx]["name"] != "Treatment of fish"
+    )
+    st.caption(
+        f"**Fuel + Lube reconciliation (Smolt + Harvest):** "
+        f"{fmt(_fl_total_ex_treatment)}/year at current rates "
+        f"(target ≈ 9,000,000 per your reconciliation) — adjust the "
+        f"NOK/day cells above for Smolt/Harvest Fuel and Lube to close the gap."
+    )
+
+    breakdown_rows = []
+    for s_idx, svc in enumerate(spot_service_items_current):
+        for item in spot_cost_items_current:
+            cost = item["cost_nok_day"][s_idx]
+            charge = cost * (item["recovery_pct"] / 100)
+            margin = charge - cost
+            breakdown_rows.append({
+                "Service": svc["name"],
+                "Item": item["name"],
+                "Cost (NOK/day)": cost,
+                "Recovery %": item["recovery_pct"],
+                "Charged to customer (NOK/day)": charge,
+                "Margin (NOK/day)": margin,
+            })
+
+    spot_cost_total_daily = sum(
+        item["cost_nok_day"][s_idx] * spot_service_items_current[s_idx]["days_per_year"]
+        for item in spot_cost_items_current
+        for s_idx in range(n_services)
+    ) / _working_days_annual if _working_days_annual else 0.0
+    spot_charge_total_daily = sum(
+        item["cost_nok_day"][s_idx] * (item["recovery_pct"] / 100) * spot_service_items_current[s_idx]["days_per_year"]
+        for item in spot_cost_items_current
+        for s_idx in range(n_services)
+    ) / _working_days_annual if _working_days_annual else 0.0
+    spot_margin_total_daily = spot_charge_total_daily - spot_cost_total_daily
+
+    _voyage_left, spot_right = st.columns([1, 1.4], gap="large")
+    with spot_right:
+        st.markdown("**Transparent charge vs. cost, per item and service**")
+        breakdown_df = pd.DataFrame(breakdown_rows)
+        show_table(breakdown_df, None, width="stretch", height=280)
+
+        chart_rows = [{"Component": "Base day-rate", "NOK/day": spot_base_rate_nok_day}]
+        for r in breakdown_rows:
+            if r["Charged to customer (NOK/day)"] > 0:
+                chart_rows.append({"Component": f"{r['Item']} ({r['Service']})", "NOK/day": r["Charged to customer (NOK/day)"]})
+        formatted_bar_chart(pd.DataFrame(chart_rows), "Component", "NOK/day")
+
+    st.divider()
+    spot_revenue_daily = spot_base_rate_nok_day + spot_charge_total_daily
+    spot_total_cost_daily_voyage_only = spot_cost_total_daily  # excludes crew/vessel opex, shown on Tab 1
+    spot_ebitda_before_crew_opex_daily = spot_revenue_daily - spot_total_cost_daily_voyage_only
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total revenue (day-rate + recovery)", fmt(spot_revenue_daily) + "/day")
+    m2.metric("Total voyage costs", fmt(spot_total_cost_daily_voyage_only) + "/day")
+    m3.metric("Net margin on cost recovery", fmt(spot_margin_total_daily) + "/day")
+    m4.metric("Base day-rate less vessel opex", fmt(spot_base_rate_nok_day - spot_opex_rate_nok_day_final) + "/day")
+
+    st.caption(
+        "Vessel opex above is the annual budget spread over working days "
+        "(see 'Vessel opex' section), not Tab 1's fixed crew opex. Voyage "
+        "costs are fully transparent: charged to the customer via "
+        "'Recovery %' above, and deducted again as an actual cost, "
+        "netting to the margin shown (zero when Recovery % = 100)."
+    )
+
+    st.divider()
+    st.markdown("**Net revenue per service** (before financing, depreciation, and tax)")
+    st.caption(
+        "Opex here is vessel opex only (annual budget ÷ working days — set "
+        "above) — not voyage costs, since those are already separately "
+        "recovered via 'Recovery %' in the Voyage costs section (netting "
+        "to zero margin impact at 100% recovery), so including them here "
+        "would double-count. Net revenue = gross price − vessel opex, per "
+        "day worked. For 'priced at baseline' services this ties out "
+        "exactly: gross was built as net target + vessel opex, so net "
+        "revenue here equals the required NET rate above."
+    )
+    net_rev_rows = []
+    for r in combined_rows:
+        gross = r["Combined rate (NOK/day)"]
+        net = gross - spot_opex_rate_nok_day_final
+        net_rev_rows.append({
+            "Service": r["Service"],
+            "Days/year": r["Days/year"],
+            "Gross price (NOK/day)": gross,
+            "Opex estimate (NOK/day)": spot_opex_rate_nok_day_final,
+            "Net revenue (NOK/day)": net,
+            "Annual net revenue (NOK)": net * r["Days/year"],
+        })
+    net_rev_df = pd.DataFrame(net_rev_rows)
+    show_table(net_rev_df, "Service", width="stretch")
+
+# ===========================================================================
 # TAB 2 — Lease spread (customer lease, with optional bank financing leg)
 # ===========================================================================
 with tab_lease:
@@ -756,6 +1403,20 @@ with tab_lease:
             "Customer lease term (months)", min_value=1, max_value=120, value=60, step=1,
             key="customer_term", disabled=locked
         )
+        lease_payback_months = stateful_number_input(
+            "Lease payback structure (months)", min_value=1, max_value=180, value=84, step=1,
+            key="lease_payback_months", disabled=locked
+        )
+        st.caption(
+            "The monthly rental rate is calculated as if amortizing the full "
+            "capex over this payback period — which can be longer than the "
+            "customer contract above (e.g. price on a 7-year/84-month "
+            "payback even though the contract is only 5 years/60 months). "
+            "This produces a lower monthly rate than a 5-year-only "
+            "amortization would, but leaves a residual, unrecovered lease "
+            "value at the end of the customer term — shown below — which is "
+            "the residual-value risk being taken on."
+        )
         lease_opex_monthly_nok = nok_input(
             "Additional opex billed to customer (NOK/month)", "lease_opex_monthly_nok",
             100_000.0, key="lease_opex_input", disabled=locked
@@ -788,14 +1449,16 @@ with tab_lease:
             )
         else:
             bank_rate_pct = 0.0
-            bank_term_months = int(customer_term_months)
+            bank_term_months = int(lease_payback_months)  # depreciation basis matches the payback structure, not the shorter customer contract
             lease_equity_instalment_nok = 0.0
 
     bank_loan_principal = max(0.0, lease_capex_nok - lease_equity_instalment_nok)
 
     # --- calculations ---
+    # Monthly rental rate is priced on the (potentially longer) payback
+    # structure, not the customer contract length — see the caption above.
     lease_monthly_payment = annuity_monthly_payment(
-        lease_capex_nok, lease_yield_pct, int(customer_term_months)
+        lease_capex_nok, lease_yield_pct, int(lease_payback_months)
     )
 
     if bank_financing_enabled:
@@ -817,10 +1480,16 @@ with tab_lease:
         total_shortfall_tail = 0.0
         net_result = 0.0
 
-    # --- full monthly schedules, always computed so later tabs can use them ---
+    # --- full monthly schedules, always computed so later tabs can use them.
+    # The customer-side schedule runs only for customer_term_months, but the
+    # payment itself was priced on the longer lease_payback_months — leaving
+    # a genuine residual (unrecovered) balance at the end; see
+    # residual_lease_value below. ---
     lease_schedule_full = amortization_schedule_full(
-        lease_capex_nok, lease_yield_pct, int(customer_term_months)
+        lease_capex_nok, lease_yield_pct, int(customer_term_months),
+        payment_basis_months=int(lease_payback_months)
     )
+    residual_lease_value = lease_schedule_full[-1]["Closing balance"] if lease_schedule_full else 0.0
     bank_schedule_full = amortization_schedule_full(
         bank_loan_principal, bank_rate_pct, int(bank_term_months)
     )
@@ -834,6 +1503,17 @@ with tab_lease:
             m1.metric("Daily", fmt(lease_daily_amt))
             m2.metric("Monthly", fmt(lease_monthly_payment))
             m3.metric("Annual", fmt(lease_annual_amt))
+
+            if int(lease_payback_months) > int(customer_term_months):
+                st.warning(
+                    f"**Residual value risk: {fmt(residual_lease_value)}.** The "
+                    f"rental rate above is priced on a {int(lease_payback_months)}-month "
+                    f"payback, but the customer only pays for "
+                    f"{int(customer_term_months)} months — leaving this much "
+                    f"unrecovered equipment value at the end of the contract, "
+                    f"with no further lease income committed against it "
+                    f"(unless renewed, re-leased, or sold)."
+                )
 
             st.subheader("Additional opex (pass-through, billed to customer)")
             lease_opex_annual_amt = lease_opex_monthly_nok * 12
@@ -868,14 +1548,19 @@ with tab_lease:
 
             # --- schedule chart ---
             lease_balances = amortization_balances(
-                lease_capex_nok, lease_yield_pct, int(customer_term_months)
+                lease_capex_nok, lease_yield_pct, int(customer_term_months),
+                payment_basis_months=int(lease_payback_months)
             )
 
             if bank_financing_enabled:
                 bank_balances = amortization_balances(
                     bank_loan_principal, bank_rate_pct, int(bank_term_months)
                 )
-                lease_balances_padded = lease_balances + [0.0] * (total_term_months - len(lease_balances))
+                # Pad with the residual value (not zero) — the unrecovered
+                # lease balance doesn't vanish at the end of the customer
+                # term, it simply stops being paid down (see the residual
+                # value metric above).
+                lease_balances_padded = lease_balances + [residual_lease_value] * (total_term_months - len(lease_balances))
                 bank_balances_padded = bank_balances + [0.0] * (total_term_months - len(bank_balances))
                 schedule_df = pd.DataFrame(
                     {
@@ -994,6 +1679,11 @@ with tab_combined:
     total_tc_annual = vessel_tc_annual + lease_annual + lease_opex_annual
     total_tc_daily = vessel_tc_daily + lease_daily + lease_opex_daily
     total_tc_monthly = vessel_tc_monthly + active_lease_monthly + active_lease_opex_monthly
+
+    # --- stored for the Spot market tab's baseline reference, which runs
+    # BEFORE this tab in script order (same one-pass-behind convention used
+    # elsewhere in the app, e.g. Tab 1's Sources & Uses guideline) ---
+    st.session_state["_combined_tc_daily"] = total_tc_daily
 
     combined_df = pd.DataFrame(
         [
@@ -1159,6 +1849,12 @@ with tab_financials:
     monthly_revenue_vessel_base = vessel_tc_monthly
 
     st.subheader("TC contract schedule")
+    if spot_market_enabled:
+        st.info(
+            "Spot market is active (see the Spot market tab) — this contract "
+            "schedule is inactive; vessel revenue instead comes from the "
+            "spot day-rate and voyage cost recovery."
+        )
     st.caption(
         "Define the initial contract length and up to 3 renewals over the "
         "horizon. Each new contract starts its own escalation clock — first "
@@ -1271,11 +1967,33 @@ with tab_financials:
     }
 
     def _get_vessel_revenue(month):
-        """Base monthly TC-revenue for this month's active contract, escalated
-        from that contract's own start (first adjustment 12 months in)."""
+        """Base monthly revenue for this month: either the active TC
+        contract (escalated from that contract's own start), or, in spot
+        mode, the sum of each service line's revenue (each escalated on its
+        own schedule) — the voyage-cost recovery charge is tracked as its
+        own line elsewhere for transparency rather than folded in here."""
+        if spot_market_enabled:
+            return sum(
+                item["monthly_base"] * _escalation_factor(item["escalator_pct"], month)
+                for item in spot_service_items_base
+            )
         return _revenue_for_contracts(tc_contracts, month)
 
-    if len(tc_contracts) > 1:
+    def _get_vessel_opex(month):
+        """Vessel opex for this month: Tab 1's fixed crewing/opex items
+        (applies every calendar day, unconditional on utilization — crew
+        salaries don't stop when idle), or, in spot mode, a variable
+        day-rate opex incurred only on working days, which REPLACES Tab 1's
+        figure for the vessel's P&L while spot mode is active (see the
+        caption on the Spot market tab)."""
+        if spot_market_enabled:
+            return spot_opex_monthly_base * _escalation_factor(spot_opex_escalator_pct, month)
+        return sum(
+            item["monthly"] * _escalation_factor(item["escalator_pct"], month)
+            for item in opex_line_items_base
+        )
+
+    if len(tc_contracts) > 1 and not spot_market_enabled:
         st.markdown("**Contract summary** (annualized rate, and uplift vs. the TC-rate just before renewal)")
         for i, c in enumerate(tc_contracts):
             annual_rate = c["base_monthly"] * 12
@@ -1303,6 +2021,48 @@ with tab_financials:
         for item, esc in zip(st.session_state.opex_items, opex_escalator_pcts)
     ]
 
+    # --- spot market basis: utilization sets the working-days basis (not
+    # every operating day earns revenue or burns voyage costs); each
+    # service line contributes its own share of those working days at its
+    # own rate and escalator. Voyage costs/recovery scale the same way,
+    # since idle days don't incur fuel/port fees either. Vessel opex
+    # (crewing — Tab 1) stays fixed on the full operating_days basis in
+    # TC mode; in spot mode it's a fixed ANNUAL budget (spot_opex_annual_nok)
+    # spread evenly across months — NOT tied to working days here, since
+    # the annual figure is the true fixed input; only its day-rate
+    # equivalent (shown on the Spot tab) derives from working days. ---
+    spot_working_days_annual = sum(item["days_per_year"] for item in spot_service_items_current)
+    spot_opex_monthly_base = spot_opex_annual_nok / 12
+    spot_service_items_base = [
+        {
+            "name": item["name"],
+            "monthly_base": (
+                (
+                    required_gross_rate_at_utilization_final if item["priced_at_baseline"]
+                    else item["rate_nok_day"] + price_list_day_rate_by_service[s_idx]
+                )
+                * item["days_per_year"] / 12
+            ),
+            "escalator_pct": item["escalator_pct"],
+        }
+        for s_idx, item in enumerate(spot_service_items_current)
+    ]
+    spot_line_items_base = [
+        {
+            "name": item["name"],
+            "monthly_cost": sum(
+                item["cost_nok_day"][s_idx] * svc["days_per_year"]
+                for s_idx, svc in enumerate(spot_service_items_current)
+            ) / 12,
+            "monthly_charge": sum(
+                item["cost_nok_day"][s_idx] * (item["recovery_pct"] / 100) * svc["days_per_year"]
+                for s_idx, svc in enumerate(spot_service_items_current)
+            ) / 12,
+            "escalator_pct": item["escalator_pct"],
+        }
+        for item in spot_cost_items_current
+    ]
+
     equipment_capex = lease_capex_nok if lease_enabled else 0.0
     equipment_debt_initial = bank_loan_principal if (lease_enabled and bank_financing_enabled) else 0.0
     equipment_equity_initial = equipment_capex - equipment_debt_initial
@@ -1316,13 +2076,19 @@ with tab_financials:
         equipment_capex / equipment_depreciation_months if equipment_depreciation_months else 0.0
     )
 
-    if monthly_revenue_vessel_base < (monthly_opex_vessel_base + debt_schedule[0]["Monthly finance cost"]):
+    if not spot_market_enabled and monthly_revenue_vessel_base < (monthly_opex_vessel_base + debt_schedule[0]["Monthly finance cost"]):
         st.warning(
             "**Note:** the vessel TC-rate (Tab 1) is built from required EBITDA + "
             "vessel opex only — it does not include debt finance cost or tax. "
             "Depending on your inputs, monthly revenue may not fully cover opex + "
             "finance cost + tax; check the P&L for negative net income if that "
             "matters for your analysis."
+        )
+    elif spot_market_enabled:
+        st.caption(
+            "ℹ️ Spot market is active — vessel revenue and voyage costs below "
+            "come from the Spot market tab, not the TC-rate on Tab 1 (Tab 1's "
+            "capex/debt sizing still applies)."
         )
 
     def _row_or_zero(schedule, month, term_months):
@@ -1425,10 +2191,12 @@ with tab_financials:
                 # of Year 5), so no extra +1 is needed here.
                 target_month_for_projection = month
                 projected_monthly_revenue = _get_vessel_revenue(target_month_for_projection)
-                projected_monthly_opex = sum(
-                    item["monthly"] * _escalation_factor(item["escalator_pct"], target_month_for_projection)
-                    for item in opex_line_items_base
-                )
+                projected_monthly_opex = _get_vessel_opex(target_month_for_projection)
+                if spot_market_enabled:
+                    for item in spot_line_items_base:
+                        _factor = _escalation_factor(item["escalator_pct"], target_month_for_projection)
+                        projected_monthly_revenue += item["monthly_charge"] * _factor
+                        projected_monthly_opex += item["monthly_cost"] * _factor
                 projected_annual_ebitda_vessel = (projected_monthly_revenue - projected_monthly_opex) * 12
                 new_principal = releverage_multiple * projected_annual_ebitda_vessel
                 refinancing_proceeds_this_month = new_principal - vessel_debt_balance
@@ -1471,12 +2239,30 @@ with tab_financials:
                 equipment_depreciation_this_month = 0.0
 
             escalated_opex_items = []
-            monthly_opex_vessel = 0.0
-            for item in opex_line_items_base:
-                factor = _escalation_factor(item["escalator_pct"], month)
-                escalated_value = item["monthly"] * factor
-                escalated_opex_items.append({"name": item["name"], "value": escalated_value})
-                monthly_opex_vessel += escalated_value
+            if spot_market_enabled:
+                monthly_opex_vessel = spot_opex_monthly_base * _escalation_factor(spot_opex_escalator_pct, month)
+                spot_vessel_opex_this_month = monthly_opex_vessel  # captured before voyage costs are added below
+            else:
+                monthly_opex_vessel = 0.0
+                spot_vessel_opex_this_month = 0.0
+                for item in opex_line_items_base:
+                    factor = _escalation_factor(item["escalator_pct"], month)
+                    escalated_value = item["monthly"] * factor
+                    escalated_opex_items.append({"name": item["name"], "value": escalated_value})
+                    monthly_opex_vessel += escalated_value
+
+            # --- spot market: voyage costs (fuel, lube, port fees, etc.) sit
+            # for the owner's account, unlike a TC charter — added into opex
+            # here, with the recovered portion already folded into
+            # _get_vessel_revenue()'s spot-mode branch above ---
+            spot_voyage_cost_this_month = 0.0
+            spot_voyage_charge_this_month = 0.0
+            if spot_market_enabled:
+                for item in spot_line_items_base:
+                    factor = _escalation_factor(item["escalator_pct"], month)
+                    spot_voyage_cost_this_month += item["monthly_cost"] * factor
+                    spot_voyage_charge_this_month += item["monthly_charge"] * factor
+                monthly_opex_vessel += spot_voyage_cost_this_month
 
             maintenance_factor = _escalation_factor(maintenance_escalator_pct, month)
             monthly_maintenance = monthly_maintenance_base * maintenance_factor
@@ -1492,8 +2278,11 @@ with tab_financials:
                 equipment_debt_closing = 0.0
 
             # --- combined P&L ---
-            revenue = monthly_revenue_vessel + lease_revenue_this_month + lease_opex_this_month
-            ebitda_vessel = monthly_revenue_vessel - monthly_opex_vessel
+            revenue = (
+                monthly_revenue_vessel + spot_voyage_charge_this_month
+                + lease_revenue_this_month + lease_opex_this_month
+            )
+            ebitda_vessel = (monthly_revenue_vessel + spot_voyage_charge_this_month) - monthly_opex_vessel
             ebitda_equipment = lease_revenue_this_month  # pass-through opex nets to zero
             ebitda = ebitda_vessel + ebitda_equipment
             ebit = ebitda - monthly_vessel_depreciation - equipment_depreciation_this_month
@@ -1504,11 +2293,16 @@ with tab_financials:
 
             pnl_row = {"Month": month}
             pnl_row["TC-revenue"] = monthly_revenue_vessel
+            if spot_market_enabled:
+                pnl_row["Voyage cost recovery (revenue)"] = spot_voyage_charge_this_month
             pnl_row["Lease-revenue"] = lease_revenue_this_month
             pnl_row["Pass-through costs"] = lease_opex_this_month
             pnl_row["Total revenue"] = revenue
             for item in escalated_opex_items:
                 pnl_row[item["name"]] = -item["value"]
+            if spot_market_enabled:
+                pnl_row["Vessel opex (spot, variable — working days only)"] = -spot_vessel_opex_this_month
+                pnl_row["Voyage costs (fuel, lube, port fees, etc.)"] = -spot_voyage_cost_this_month
             pnl_row["Equipment opex (pass-through)"] = -lease_opex_this_month
             pnl_row["EBITDA — vessel"] = ebitda_vessel
             pnl_row["EBITDA — equipment"] = ebitda_equipment
@@ -1795,10 +2589,12 @@ with tab_investment:
         """EBITDA (vessel + equipment) for any month, including beyond the
         modeled horizon — used to project the exit year's EBITDA."""
         revenue = _get_vessel_revenue(month)
-        opex = sum(
-            item["monthly"] * _escalation_factor(item["escalator_pct"], month)
-            for item in opex_line_items_base
-        )
+        opex = _get_vessel_opex(month)
+        if spot_market_enabled:
+            for item in spot_line_items_base:
+                _factor = _escalation_factor(item["escalator_pct"], month)
+                revenue += item["monthly_charge"] * _factor
+                opex += item["monthly_cost"] * _factor
         ebitda_v = revenue - opex
         if lease_enabled and month <= int(customer_term_months):
             ebitda_e = lease_monthly_payment * _escalation_factor(lease_escalator_pct, month)
@@ -1894,6 +2690,50 @@ with tab_investment:
             f"(including the terminal value): {fmt(total_distributed)}."
         )
 
+    st.divider()
+    st.subheader("Instant equity value creation (Day 1 mark-to-market)")
+    st.caption(
+        "A quick check owners look at: if the vessel could be sold "
+        "immediately at a market EBITDA multiple, using Year 1 EBITDA, "
+        "what's the resulting equity value versus what's actually been "
+        "put in? EV = Year 1 EBITDA x multiple. Instant equity value = EV "
+        "less starting debt (vessel + leased equipment only — excludes "
+        "any operational funding debt). Shown against equity exposed both "
+        "with and without covering the operational funding gap via "
+        "equity, to see the immediate value-creation MOIC either way — "
+        "distinct from the full-horizon Equity IRR/MOIC above, which "
+        "accounts for cash flows over the whole investment life plus the "
+        "terminal value at actual exit."
+    )
+
+    _year1_ebitda_ia = pnl_annual.loc[1, "EBITDA"] if 1 in pnl_annual.index else 0.0
+    _debt_vessel_and_lease_at_close_ia = debt_nok + equipment_debt_initial
+    _equity_excl_opfunding_ia = vessel_equity_initial + equipment_equity_initial
+    _equity_incl_opfunding_ia = vessel_equity_initial + equipment_equity_initial + operational_equity_nok
+
+    instant_value_rows_ia = []
+    for _multiple in (10.0, 11.0, 12.0):
+        _ev = _year1_ebitda_ia * _multiple
+        _instant_equity_value = _ev - _debt_vessel_and_lease_at_close_ia
+        _moic_excl = (_instant_equity_value / _equity_excl_opfunding_ia) if _equity_excl_opfunding_ia else None
+        _moic_incl = (_instant_equity_value / _equity_incl_opfunding_ia) if _equity_incl_opfunding_ia else None
+        instant_value_rows_ia.append({
+            "EBITDA multiple": f"{_multiple:.0f}x",
+            "Enterprise value (EV)": fmt(_ev),
+            "Less: debt (vessel + lease)": fmt(_debt_vessel_and_lease_at_close_ia),
+            "Instant equity value": fmt(_instant_equity_value),
+            "Equity exposed, excl. op. funding gap": fmt(_equity_excl_opfunding_ia),
+            "Instant MOIC, excl. gap (x)": f"{_moic_excl:.2f}x" if _moic_excl is not None else "—",
+            "Equity exposed, incl. op. funding gap": fmt(_equity_incl_opfunding_ia),
+            "Instant MOIC, incl. gap (x)": f"{_moic_incl:.2f}x" if _moic_incl is not None else "—",
+        })
+    instant_value_df_ia = pd.DataFrame(instant_value_rows_ia).set_index("EBITDA multiple")
+    st.dataframe(instant_value_df_ia, width="stretch")
+    st.caption(
+        f"Operational funding gap currently modeled: {fmt(operational_equity_nok)} "
+        f"of equity allocated to it (see Tab 1's Sources & Uses to adjust)."
+    )
+
     st.subheader("Equity cash flow schedule")
     chart_df = equity_cf_df.copy()
     chart_df["Cumulative equity cash flow"] = chart_df["Equity cash flow"].cumsum()
@@ -1945,6 +2785,46 @@ with tab_summary:
     _yield_on_nbv_yr1 = (_year1_ebitda / _year1_nbv) if _year1_nbv else 0.0
     i3.metric("EBITDA yield on capex (Yr 1)", f"{_yield_on_capex_yr1:.1%}")
     i4.metric("EBITDA yield on NBV (Yr 1)", f"{_yield_on_nbv_yr1:.1%}")
+
+    st.divider()
+    st.markdown("**Instant equity value creation** (Day 1 mark-to-market)")
+    st.caption(
+        "A quick check owners look at: if the vessel could be sold "
+        "immediately at a market EBITDA multiple, using Year 1 EBITDA, "
+        "what's the resulting equity value versus what's actually been "
+        "put in? EV = Year 1 EBITDA x multiple. Instant equity value = EV "
+        "less starting debt (vessel + leased equipment only — excludes "
+        "any operational funding debt). Shown against equity exposed both "
+        "with and without covering the operational funding gap via "
+        "equity, to see the immediate value-creation MOIC either way."
+    )
+
+    _debt_vessel_and_lease_at_close = debt_nok + equipment_debt_initial
+    _equity_excl_opfunding = vessel_equity_initial + equipment_equity_initial
+    _equity_incl_opfunding = total_equity_at_close  # already includes operational_equity_nok
+
+    instant_value_rows = []
+    for _multiple in (10.0, 11.0, 12.0):
+        _ev = _year1_ebitda * _multiple
+        _instant_equity_value = _ev - _debt_vessel_and_lease_at_close
+        _moic_excl = (_instant_equity_value / _equity_excl_opfunding) if _equity_excl_opfunding else None
+        _moic_incl = (_instant_equity_value / _equity_incl_opfunding) if _equity_incl_opfunding else None
+        instant_value_rows.append({
+            "EBITDA multiple": f"{_multiple:.0f}x",
+            "Enterprise value (EV)": fmt(_ev),
+            "Less: debt (vessel + lease)": fmt(_debt_vessel_and_lease_at_close),
+            "Instant equity value": fmt(_instant_equity_value),
+            "Equity exposed, excl. op. funding gap": fmt(_equity_excl_opfunding),
+            "Instant MOIC, excl. gap (x)": f"{_moic_excl:.2f}x" if _moic_excl is not None else "—",
+            "Equity exposed, incl. op. funding gap": fmt(_equity_incl_opfunding),
+            "Instant MOIC, incl. gap (x)": f"{_moic_incl:.2f}x" if _moic_incl is not None else "—",
+        })
+    instant_value_df = pd.DataFrame(instant_value_rows).set_index("EBITDA multiple")
+    st.dataframe(instant_value_df, width="stretch")
+    st.caption(
+        f"Operational funding gap currently modeled: {fmt(operational_equity_nok)} "
+        f"of equity allocated to it (see Tab 1's Sources & Uses to adjust)."
+    )
 
     st.divider()
     st.markdown("**Annual ratios**")
@@ -2077,6 +2957,18 @@ def _build_workbook() -> bytes:
         results_df.to_excel(writer, sheet_name="Vessel TC-rate")
         finance_cost_summary_df.to_excel(writer, sheet_name="Finance cost summary", index=False)
         debt_schedule_df.to_excel(writer, sheet_name="Vessel debt schedule", index=False)
+        if spot_market_enabled:
+            breakdown_df.to_excel(writer, sheet_name="Spot market breakdown", index=False)
+            pd.DataFrame(spot_service_items_current).to_excel(writer, sheet_name="Spot service mix", index=False)
+            _price_list_export_rows = [
+                {
+                    "Item": item["name"], "Unit": item["unit"], "Rate": item["rate"],
+                    **{f"Qty/day — {s_name}": item["qty_per_day"][s_idx] for s_idx, s_name in enumerate(service_names)}
+                }
+                for item in spot_price_items_current
+            ]
+            pd.DataFrame(_price_list_export_rows).to_excel(writer, sheet_name="Spot price list", index=False)
+            combined_rate_df.to_excel(writer, sheet_name="Spot combined rate", index=False)
         if lease_enabled:
             lease_schedule_df.to_excel(writer, sheet_name="Lease schedule", index=False)
             if bank_financing_enabled:
@@ -2090,7 +2982,9 @@ def _build_workbook() -> bytes:
         bs_df.to_excel(writer, sheet_name="Balance sheet (monthly)", index=False)
         bs_annual.to_excel(writer, sheet_name="Balance sheet (annual)")
         equity_cf_df.to_excel(writer, sheet_name="Equity cash flow (IRR)", index=False)
+        instant_value_df_ia.to_excel(writer, sheet_name="Instant equity value (IA)")
         ratio_df.to_excel(writer, sheet_name="Summary ratios")
+        instant_value_df.to_excel(writer, sheet_name="Instant equity value")
         _style_workbook(writer.book)
     buffer.seek(0)
     return buffer.getvalue()
