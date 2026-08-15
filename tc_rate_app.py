@@ -97,6 +97,15 @@ if "unlocked" not in st.session_state:
     st.session_state.unlocked = False
 
 with st.sidebar:
+    st.subheader("🔄 Refresh")
+    if st.button("Refresh calculations"):
+        st.rerun()
+    st.caption(
+        "A few figures (e.g. Tab 1's Sources & Uses guideline) are computed "
+        "one script pass behind live edits elsewhere. If a number looks "
+        "stale after changing inputs, click here instead of switching tabs."
+    )
+    st.divider()
     st.subheader("🔒 Edit access")
     if st.session_state.unlocked:
         st.success("Unlocked — inputs are editable.")
