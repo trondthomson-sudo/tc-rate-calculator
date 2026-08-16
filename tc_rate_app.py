@@ -43,18 +43,25 @@ CONFIG_EXCLUDE_KEYS = {"unlocked", "unlock_password_input", "_config_loaded", "_
 
 
 def _is_excluded_key(key: str) -> bool:
-    """Buttons (like the opex/service/price/voyage-cost '✕' remove buttons)
-    can't have their session_state pre-set — Streamlit raises a
+    """Buttons (like the opex/service/price/voyage-cost '✕' remove
+    buttons, and '+ Add phase'-style add buttons) can't have their
+    session_state pre-set — Streamlit raises a
     StreamlitValueAssignmentNotAllowedError if you try, since buttons are
     trigger-only widgets. File uploader keys shouldn't be restored either.
-    Match on "_remove_" anywhere in the key (not just a "remove_" prefix)
-    so this catches every remove-button naming pattern used across the
-    app (remove_{i}, service_remove_{i}, price_remove_{i}, spot_remove_{i},
-    and any future ones), rather than needing a new prefix added here
-    every time a new item list with its own remove button is built."""
+    Match on "_remove_" and "_add_" anywhere in the key (not just as a
+    prefix) so this catches every button naming pattern used across the
+    app (remove_{i}, service_remove_{i}, smolt_add_phase,
+    harvest_add_phase, and any future ones), rather than needing a new
+    prefix added here every time a new button is built. Note: "_add_"
+    specifically (underscores on both sides) — NOT a bare "add" substring
+    match, which would incorrectly exclude legitimate restorable inputs
+    like "spot_additional_capex_depreciation" (contains "add" as part of
+    "additional", not as its own "_add_" token)."""
     if key in CONFIG_EXCLUDE_KEYS:
         return True
     if key.startswith("remove_") or "_remove_" in key:
+        return True
+    if key.startswith("add_") or "_add_" in key:
         return True
     return False
 
@@ -71,16 +78,19 @@ def _apply_config(config_dict):
 
 # Defensive cleanup, run every single pass (cheap — just a key filter):
 # strip any session_state entries for button-only keys (remove_*,
-# *_remove_*) that may have been set incorrectly by an older app version's
-# config file, or any other means. Buttons are trigger-only widgets and
-# can never legitimately hold a stored value; setting one raises
-# StreamlitValueAssignmentNotAllowedError — but only when the button
-# widget itself is created, not at assignment time, so _apply_config's
-# own try/except above can't catch it. This runs unconditionally so any
-# already-poisoned session (from before _is_excluded_key was widened to
-# also exclude these keys) gets cleaned up immediately, without needing a
-# brand-new session.
-for _k in [k for k in list(st.session_state.keys()) if k.startswith("remove_") or "_remove_" in k]:
+# *_remove_*, add_*, *_add_*) that may have been set incorrectly by an
+# older app version's config file, or any other means. Buttons are
+# trigger-only widgets and can never legitimately hold a stored value;
+# setting one raises StreamlitValueAssignmentNotAllowedError — but only
+# when the button widget itself is created, not at assignment time, so
+# _apply_config's own try/except above can't catch it. This runs
+# unconditionally so any already-poisoned session (from before
+# _is_excluded_key was widened to also exclude these keys) gets cleaned
+# up immediately, without needing a brand-new session.
+for _k in [
+    k for k in list(st.session_state.keys())
+    if k.startswith("remove_") or "_remove_" in k or k.startswith("add_") or "_add_" in k
+]:
     del st.session_state[_k]
 
 _config_status = None
