@@ -299,14 +299,21 @@ def fmt(n):
     return format_nok(n)  # currency shown once, via the field at the top — not repeated per number
 
 
-def show_table(df: pd.DataFrame, label_col: str = None, **kwargs):
+def show_table(df: pd.DataFrame, label_col: str = None, decimal_cols: list = None, **kwargs):
     """Display a numeric dataframe with right-aligned, thousands-separated
     columns (Streamlit only right-aligns numeric dtype columns — pre-formatted
     strings stay left-aligned regardless of styling, hence keeping values raw
     here and letting column_config handle the display format).
-    If label_col is given, that column becomes the index (kept as text)."""
+    If label_col is given, that column becomes the index (kept as text).
+    decimal_cols: optional list of column names to show with one decimal
+    place instead of the default integer formatting (e.g. a "Months"
+    column where 7.5 matters and rounding to 7 or 8 would be misleading)."""
     display_df = df.set_index(label_col) if label_col else df
-    config = {col: st.column_config.NumberColumn(format="%,d") for col in display_df.columns}
+    decimal_cols = decimal_cols or []
+    config = {
+        col: st.column_config.NumberColumn(format="%.1f" if col in decimal_cols else "%,d")
+        for col in display_df.columns
+    }
     st.dataframe(display_df, column_config=config, **kwargs)
 
 
@@ -426,8 +433,9 @@ def amortization_schedule_full(principal_nok: float, annual_rate_pct: float, num
 
 if "opex_items" not in st.session_state:
     st.session_state.opex_items = [
-        {"name": "Crewing", "value_nok": 21_500_000.0},
-        {"name": "Other vessel opex", "value_nok": 6_500_000.0},
+        {"name": "Crewing", "value_nok": 19_737_162.08},
+        {"name": "Insurance", "value_nok": 2_548_000.0},
+        {"name": "Other vessel opex", "value_nok": 3_250_000.0},
     ]
 
 
@@ -450,8 +458,8 @@ def _on_opex_value_change(index):
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_vessel, tab_spot, tab_lease, tab_combined, tab_financials, tab_investment, tab_summary = st.tabs(
-    ["Vessel TC-rate", "Spot market", "Lease spread", "Combined TC-rate", "Financial Statements", "Investment Analysis", "Summary"]
+tab_vessel, tab_opex, tab_construction, tab_spot, tab_lease, tab_combined, tab_financials, tab_investment, tab_summary = st.tabs(
+    ["Vessel TC-rate", "Vessel opex", "Construction capex", "Spot market", "Lease spread", "Combined TC-rate", "Financial Statements", "Investment Analysis", "Summary"]
 )
 
 # ===========================================================================
@@ -471,7 +479,21 @@ with tab_vessel:
         )
 
         st.subheader("Vessel opex (annual, NOK)")
+        opex_linked_to_vessel_opex_tab = stateful_toggle(
+            "Link Crewing / Insurance / Other vessel opex to the Vessel opex tab?",
+            value=True, key="opex_linked_to_vessel_opex_tab", disabled=locked
+        )
+        st.caption(
+            "When on, these three line items are driven automatically by "
+            "the detailed build-up on the Vessel opex tab — their value "
+            "fields below are disabled, since editing happens there "
+            "instead. Turn this off to set them manually here again "
+            "(e.g. for a quick standalone estimate without touching the "
+            "detailed build-up)."
+        )
+        _linked_opex_names = {"Crewing", "Insurance", "Other vessel opex"}
         for i, item in enumerate(st.session_state.opex_items):
+            _this_item_is_linked = opex_linked_to_vessel_opex_tab and item["name"] in _linked_opex_names
             c1, c2, c3 = st.columns([2.2, 1.6, 0.4])
             with c1:
                 item["name"] = st.text_input(
@@ -487,7 +509,7 @@ with tab_vessel:
                     label_visibility="collapsed",
                     on_change=_on_opex_value_change,
                     args=(i,),
-                    disabled=locked,
+                    disabled=locked or _this_item_is_linked,
                 )
             with c3:
                 st.button("✕", key=f"remove_{i}", on_click=remove_opex_item, args=(i,), disabled=locked)
@@ -801,6 +823,1038 @@ with tab_vessel:
         )
 
 # ===========================================================================
+# TAB 1.5 — Vessel opex (detailed bottom-up build-up: crew wages, Norwegian
+#           net wage scheme, insurance, other vessel cost — replicated from
+#           the uploaded Opex workbook)
+# ===========================================================================
+with tab_opex:
+    st.subheader("Vessel opex — detailed build-up")
+    st.caption(
+        "Bottom-up crew cost, insurance, and other vessel cost build-up, "
+        "replicated from the uploaded Opex workbook — including the "
+        "Norwegian net wage scheme for seafarers (nettolønnsordningen): "
+        "the state refunds the employer's payroll tax on Norwegian "
+        "seafarers' wages, up to a cap per crew member per year."
+    )
+
+    opexfolder_vessel_value = capex_nok
+    st.metric("Vessel value (for insurance calc)", fmt(opexfolder_vessel_value))
+    st.caption(
+        "Linked directly to Tab 1's Capex — always the same number, "
+        "edited there, not here."
+    )
+
+    st.markdown("**Wages** (by rank)")
+    if "opexfolder_wages" not in st.session_state:
+        st.session_state.opexfolder_wages = [
+            {"rank": "Captain", "headcount": 2, "monthly_wage": 99_900.0, "tax_rate_pct": 24.0},
+            {"rank": "Chief Officer", "headcount": 2, "monthly_wage": 89_500.0, "tax_rate_pct": 24.0},
+            {"rank": "Chief Engineer", "headcount": 2, "monthly_wage": 83_000.0, "tax_rate_pct": 24.0},
+            {"rank": "Able Seaman", "headcount": 4, "monthly_wage": 59_300.0, "tax_rate_pct": 22.0},
+            {"rank": "Cook", "headcount": 2, "monthly_wage": 59_300.0, "tax_rate_pct": 22.0},
+            {"rank": "Apprentice", "headcount": 2, "monthly_wage": 23_000.0, "tax_rate_pct": 22.0},
+            {"rank": "Deck Cadet", "headcount": 0, "monthly_wage": 30_000.0, "tax_rate_pct": 22.0},
+            {"rank": "Second Engineer", "headcount": 2, "monthly_wage": 69_300.0, "tax_rate_pct": 22.0},
+            {"rank": "First Mate", "headcount": 2, "monthly_wage": 79_000.0, "tax_rate_pct": 24.0},
+            {"rank": "Ordinary Seaman", "headcount": 2, "monthly_wage": 59_300.0, "tax_rate_pct": 22.0},
+        ]
+
+    def _add_wage_row():
+        st.session_state.opexfolder_wages.append(
+            {"rank": "New rank", "headcount": 0, "monthly_wage": 0.0, "tax_rate_pct": 22.0}
+        )
+
+    def _remove_wage_row(index):
+        st.session_state.opexfolder_wages.pop(index)
+
+    def _on_wage_monthly_change(index):
+        raw = st.session_state[f"opexfolder_wage_monthly_{index}"]
+        value = parse_nok(raw)
+        st.session_state.opexfolder_wages[index]["monthly_wage"] = value
+        st.session_state[f"opexfolder_wage_monthly_{index}"] = format_nok(value)
+
+    whdr = st.columns([1.6, 0.8, 1.2, 1.0, 0.4])
+    whdr[0].markdown("**Rank**")
+    whdr[1].markdown("**#**")
+    whdr[2].markdown("**Monthly wage (NOK)**")
+    whdr[3].markdown("**Tax rate (%)**")
+
+    for i, item in enumerate(st.session_state.opexfolder_wages):
+        c1, c2, c3, c4, c5 = st.columns([1.6, 0.8, 1.2, 1.0, 0.4])
+        with c1:
+            item["rank"] = st.text_input(
+                "Rank", value=item["rank"], key=f"opexfolder_wage_rank_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c2:
+            item["headcount"] = st.number_input(
+                "#", min_value=0, value=item["headcount"], step=1,
+                key=f"opexfolder_wage_headcount_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c3:
+            _monthly_wage_display_key = f"opexfolder_wage_monthly_{i}"
+            if _monthly_wage_display_key not in st.session_state:
+                st.session_state[_monthly_wage_display_key] = format_nok(item["monthly_wage"])
+            st.text_input(
+                "Monthly wage", key=_monthly_wage_display_key, label_visibility="collapsed",
+                on_change=_on_wage_monthly_change, args=(i,), disabled=locked
+            )
+        with c4:
+            item["tax_rate_pct"] = st.number_input(
+                "Tax rate (%)", min_value=0.0, max_value=100.0, value=item["tax_rate_pct"], step=1.0,
+                key=f"opexfolder_wage_taxrate_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c5:
+            st.button("✕", key=f"opexfolder_wage_remove_{i}", on_click=_remove_wage_row, args=(i,), disabled=locked)
+
+    st.button("+ Add rank", key="opexfolder_wage_add_rank", on_click=_add_wage_row, disabled=locked)
+
+    st.markdown("**Rotation & net wage scheme inputs**")
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    with rc1:
+        opexfolder_days_on_board = stateful_number_input(
+            "Days on board /yr /crew member", min_value=0.0, value=182.5, step=0.5,
+            key="opexfolder_days_on_board", disabled=locked
+        )
+    with rc2:
+        opexfolder_trips_per_year = stateful_number_input(
+            "# of travels /yr /crew member", min_value=0.0, value=13.0, step=1.0,
+            key="opexfolder_trips_per_year", disabled=locked
+        )
+    with rc3:
+        opexfolder_max_grant_per_head = nok_input(
+            "Max grant /head/yr (NOK)", "opexfolder_max_grant_per_head", 216_000.0,
+            key="opexfolder_max_grant_input", disabled=locked
+        )
+    with rc4:
+        opexfolder_1g = nok_input(
+            "1G — Norwegian base amount (NOK)", "opexfolder_1g", 118_620.0,
+            key="opexfolder_1g_input", disabled=locked
+        )
+    opexfolder_7_1g = opexfolder_1g * 7.1
+    st.caption(
+        f"7.1G threshold = 1G x 7.1 = {fmt(opexfolder_7_1g)}. Grant = MIN(max grant/head x "
+        f"headcount, tax on that rank's total wages). Salary above 7.1G (floored at 0) "
+        f"feeds the OTP (7.1G-12G) social cost line below."
+    )
+
+    # --- per-rank computation, mirroring the workbook's Calculations table ---
+    _opexfolder_wage_calc = []
+    for item in st.session_state.opexfolder_wages:
+        _yearly_salary = item["monthly_wage"] * 12
+        _yearly_wages_total = item["headcount"] * _yearly_salary
+        _tax = _yearly_wages_total * (item["tax_rate_pct"] / 100)
+        _max_grant = opexfolder_max_grant_per_head * item["headcount"]
+        _grant = min(_max_grant, _tax)
+        _salary_above_71g = (_yearly_salary - opexfolder_7_1g) * item["headcount"]
+        _salary_above_71g_floored = max(0.0, _salary_above_71g)
+        _opexfolder_wage_calc.append({
+            "Rank": item["rank"], "#": item["headcount"], "Yearly wages (total)": _yearly_wages_total,
+            "Tax": _tax, "Max grant": _max_grant, "Grant": _grant,
+            "Salary above 7.1G (floored)": _salary_above_71g_floored,
+        })
+
+    opexfolder_total_headcount = sum(item["headcount"] for item in st.session_state.opexfolder_wages)
+    opexfolder_total_yearly_wages = sum(r["Yearly wages (total)"] for r in _opexfolder_wage_calc)
+    opexfolder_total_grant = sum(r["Grant"] for r in _opexfolder_wage_calc)
+    opexfolder_total_salary_above_71g = sum(r["Salary above 7.1G (floored)"] for r in _opexfolder_wage_calc)
+
+    st.markdown("**Grant scheme calculation** (by rank)")
+    wage_calc_df = pd.DataFrame(_opexfolder_wage_calc)
+    show_table(wage_calc_df, "Rank", width="stretch")
+    wc1, wc2, wc3 = st.columns(3)
+    wc1.metric("Total headcount", f"{opexfolder_total_headcount:.0f}")
+    wc2.metric("Total yearly wages", fmt(opexfolder_total_yearly_wages))
+    wc3.metric("Total grant (refund)", fmt(opexfolder_total_grant))
+
+    with st.expander("Show the equation behind each column above"):
+        _example = _opexfolder_wage_calc[0] if _opexfolder_wage_calc else None
+        _example_input = st.session_state.opexfolder_wages[0] if st.session_state.opexfolder_wages else None
+        _example_text = ""
+        if _example is not None and _example_input is not None:
+            _yearly_salary_ex = _example_input["monthly_wage"] * 12
+            _example_text = f"""
+**Worked example — {_example_input['rank']}** ({_example_input['headcount']} crew, {fmt(_example_input['monthly_wage'])}/month, {_example_input['tax_rate_pct']:.0f}% tax rate):
+
+- Yearly salary (per person) = monthly wage × 12 = {fmt(_example_input['monthly_wage'])} × 12 = {fmt(_yearly_salary_ex)}
+- Yearly wages (total) = headcount × yearly salary = {_example_input['headcount']} × {fmt(_yearly_salary_ex)} = **{fmt(_example['Yearly wages (total)'])}**
+- Tax = tax rate × yearly wages (total) = {_example_input['tax_rate_pct']:.0f}% × {fmt(_example['Yearly wages (total)'])} = **{fmt(_example['Tax'])}**
+- Max grant = max grant/head ({fmt(opexfolder_max_grant_per_head)}) × headcount = {fmt(opexfolder_max_grant_per_head)} × {_example_input['headcount']} = **{fmt(_example['Max grant'])}**
+- Grant = MIN(Max grant, Tax) = MIN({fmt(_example['Max grant'])}, {fmt(_example['Tax'])}) = **{fmt(_example['Grant'])}**
+- Salary above 7.1G = MAX(0, (yearly salary − 7.1G threshold) × headcount) = MAX(0, ({fmt(_yearly_salary_ex)} − {fmt(opexfolder_7_1g)}) × {_example_input['headcount']}) = **{fmt(_example['Salary above 7.1G (floored)'])}**
+"""
+        st.markdown(
+            _example_text
+            + "\nEach rank runs through the same five equations; the table above just "
+              "shows the result for every rank at once. **Grant** is the Norwegian net "
+              "wage scheme refund — the state reimburses the employer's payroll tax on "
+              "Norwegian seafarers' wages, capped per head — and **Salary above 7.1G** "
+              "feeds directly into the OTP (7.1G-12G) line in the Social costs table below."
+        )
+
+    st.markdown("**Social costs** (breakdown)")
+    st.caption(
+        "Each line uses the same formula type as the source workbook — "
+        "provisions and travel cost scale with headcount and rotation; "
+        "AGA/MPK/OTP/AFP scale with total wages (or wages above 7.1G for "
+        "the second OTP line); the rest are flat per-head costs. Rates "
+        "are all editable."
+    )
+    if "opexfolder_social_rates" not in st.session_state:
+        st.session_state.opexfolder_social_rates = {
+            "provisions_per_head_day": 280.0,
+            "travel_cost_per_trip": 9_100.0,
+            "aga_pct": 5.1,
+            "mpk_pct": 3.3,
+            "otp_12g_pct": 3.0,
+            "otp_71g_12g_pct": 12.0,
+            "afp_pct": 2.6,
+            "health_insurance_per_head": 2_500.0,
+            "travel_insurance_per_head": 1_000.0,
+            "nautilus_per_head": 7_152.0,
+            "lo_nho_per_head": 600.0,
+            "norsk_maritim_per_head": 12_000.0,
+            "gruppeliv_per_head": 1_020.0,
+            "certificates_per_head": 1_500.0,
+            "other_personnel_per_head": 3_000.0,
+        }
+    _sr = st.session_state.opexfolder_social_rates
+
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        _sr["provisions_per_head_day"] = stateful_number_input(
+            "Provisions (NOK/head/day aboard)", min_value=0.0, value=_sr["provisions_per_head_day"], step=10.0,
+            key="opexfolder_sr_provisions", disabled=locked
+        )
+        _sr["travel_cost_per_trip"] = stateful_number_input(
+            "Travel cost (NOK/trip/head)", min_value=0.0, value=_sr["travel_cost_per_trip"], step=100.0,
+            key="opexfolder_sr_travel", disabled=locked
+        )
+        _sr["aga_pct"] = stateful_number_input(
+            "AGA (%, of total wages)", min_value=0.0, value=_sr["aga_pct"], step=0.1,
+            key="opexfolder_sr_aga", disabled=locked
+        )
+        _sr["mpk_pct"] = stateful_number_input(
+            "Employer premium MPK (%, of total wages)", min_value=0.0, value=_sr["mpk_pct"], step=0.1,
+            key="opexfolder_sr_mpk", disabled=locked
+        )
+        _sr["otp_12g_pct"] = stateful_number_input(
+            "OTP inntil 12G (%, of total wages)", min_value=0.0, value=_sr["otp_12g_pct"], step=0.1,
+            key="opexfolder_sr_otp12g", disabled=locked
+        )
+    with sc2:
+        _sr["otp_71g_12g_pct"] = stateful_number_input(
+            "OTP 7.1G-12G (%, of salary above 7.1G)", min_value=0.0, value=_sr["otp_71g_12g_pct"], step=0.1,
+            key="opexfolder_sr_otp71g", disabled=locked
+        )
+        _sr["afp_pct"] = stateful_number_input(
+            "AFP (%, of total wages)", min_value=0.0, value=_sr["afp_pct"], step=0.1,
+            key="opexfolder_sr_afp", disabled=locked
+        )
+        _sr["health_insurance_per_head"] = stateful_number_input(
+            "Health insurance (NOK/head/yr)", min_value=0.0, value=_sr["health_insurance_per_head"], step=100.0,
+            key="opexfolder_sr_health", disabled=locked
+        )
+        _sr["travel_insurance_per_head"] = stateful_number_input(
+            "Travel insurance (NOK/head/yr)", min_value=0.0, value=_sr["travel_insurance_per_head"], step=100.0,
+            key="opexfolder_sr_travelins", disabled=locked
+        )
+        _sr["nautilus_per_head"] = stateful_number_input(
+            "Nautilus insurance (NOK/head/yr)", min_value=0.0, value=_sr["nautilus_per_head"], step=100.0,
+            key="opexfolder_sr_nautilus", disabled=locked
+        )
+    with sc3:
+        _sr["lo_nho_per_head"] = stateful_number_input(
+            "LO/NHO/Kystrederiene (NOK/head/yr)", min_value=0.0, value=_sr["lo_nho_per_head"], step=100.0,
+            key="opexfolder_sr_lonho", disabled=locked
+        )
+        _sr["norsk_maritim_per_head"] = stateful_number_input(
+            "Norsk Maritim Kompetanse (NOK/head/yr)", min_value=0.0, value=_sr["norsk_maritim_per_head"], step=100.0,
+            key="opexfolder_sr_nmk", disabled=locked
+        )
+        _sr["gruppeliv_per_head"] = stateful_number_input(
+            "Gruppelivsforsikring (NOK/head/yr)", min_value=0.0, value=_sr["gruppeliv_per_head"], step=10.0,
+            key="opexfolder_sr_gruppeliv", disabled=locked
+        )
+        _sr["certificates_per_head"] = stateful_number_input(
+            "Certificates crew (NOK/head/yr)", min_value=0.0, value=_sr["certificates_per_head"], step=100.0,
+            key="opexfolder_sr_certs", disabled=locked
+        )
+        _sr["other_personnel_per_head"] = stateful_number_input(
+            "Other personnel cost (NOK/head/yr)", min_value=0.0, value=_sr["other_personnel_per_head"], step=100.0,
+            key="opexfolder_sr_otherpersonnel", disabled=locked
+        )
+
+    _opexfolder_social_costs = {
+        "Provisions": _sr["provisions_per_head_day"] * opexfolder_total_headcount * opexfolder_days_on_board,
+        "Travel cost": _sr["travel_cost_per_trip"] * opexfolder_trips_per_year * opexfolder_total_headcount,
+        "AGA": opexfolder_total_yearly_wages * (_sr["aga_pct"] / 100),
+        "Employer premium MPK": opexfolder_total_yearly_wages * (_sr["mpk_pct"] / 100),
+        "OTP (inntil 12G)": opexfolder_total_yearly_wages * (_sr["otp_12g_pct"] / 100),
+        "OTP (7.1G-12G)": opexfolder_total_salary_above_71g * (_sr["otp_71g_12g_pct"] / 100),
+        "AFP": opexfolder_total_yearly_wages * (_sr["afp_pct"] / 100),
+        "Health insurance": _sr["health_insurance_per_head"] * opexfolder_total_headcount,
+        "Travel insurance": _sr["travel_insurance_per_head"] * opexfolder_total_headcount,
+        "Nautilus insurance": _sr["nautilus_per_head"] * opexfolder_total_headcount,
+        "LO/NHO/Kystrederiene": _sr["lo_nho_per_head"] * opexfolder_total_headcount,
+        "Norsk Maritim Kompetanse": _sr["norsk_maritim_per_head"] * opexfolder_total_headcount,
+        "Gruppelivsforsikring": _sr["gruppeliv_per_head"] * opexfolder_total_headcount,
+        "Certificates crew": _sr["certificates_per_head"] * opexfolder_total_headcount,
+        "Other personnel cost": _sr["other_personnel_per_head"] * opexfolder_total_headcount,
+    }
+    opexfolder_total_social_costs = sum(_opexfolder_social_costs.values())
+    social_costs_df = pd.DataFrame(
+        [{"Item": k, "Annual cost (NOK)": v} for k, v in _opexfolder_social_costs.items()]
+        + [{"Item": "Total", "Annual cost (NOK)": opexfolder_total_social_costs}]
+    )
+    show_table(social_costs_df, "Item", width="stretch")
+
+    with st.expander("Show the equation behind each line above"):
+        st.markdown(
+            f"""
+Five formula types, each applied consistently to every line of that type:
+
+**1) Per head, per day aboard** — rate × total headcount × days on board/yr
+- Provisions = {fmt(_sr['provisions_per_head_day'])} × {opexfolder_total_headcount:.0f} × {opexfolder_days_on_board:.1f} = **{fmt(_opexfolder_social_costs['Provisions'])}**
+
+**2) Per trip, per head** — rate × trips/yr × total headcount
+- Travel cost = {fmt(_sr['travel_cost_per_trip'])} × {opexfolder_trips_per_year:.0f} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['Travel cost'])}**
+
+**3) % of total annual wages** — rate% × total yearly wages ({fmt(opexfolder_total_yearly_wages)})
+- AGA = {_sr['aga_pct']:.1f}% × {fmt(opexfolder_total_yearly_wages)} = **{fmt(_opexfolder_social_costs['AGA'])}**
+- Employer premium MPK = {_sr['mpk_pct']:.1f}% × {fmt(opexfolder_total_yearly_wages)} = **{fmt(_opexfolder_social_costs['Employer premium MPK'])}**
+- OTP (inntil 12G) = {_sr['otp_12g_pct']:.1f}% × {fmt(opexfolder_total_yearly_wages)} = **{fmt(_opexfolder_social_costs['OTP (inntil 12G)'])}**
+- AFP = {_sr['afp_pct']:.1f}% × {fmt(opexfolder_total_yearly_wages)} = **{fmt(_opexfolder_social_costs['AFP'])}**
+
+**4) % of wages above the 7.1G threshold** — rate% × total salary above 7.1G, floored at 0 per rank ({fmt(opexfolder_total_salary_above_71g)})
+- OTP (7.1G-12G) = {_sr['otp_71g_12g_pct']:.1f}% × {fmt(opexfolder_total_salary_above_71g)} = **{fmt(_opexfolder_social_costs['OTP (7.1G-12G)'])}**
+
+**5) Flat per head, per year** — rate × total headcount ({opexfolder_total_headcount:.0f})
+- Health insurance = {fmt(_sr['health_insurance_per_head'])} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['Health insurance'])}**
+- Travel insurance = {fmt(_sr['travel_insurance_per_head'])} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['Travel insurance'])}**
+- Nautilus insurance = {fmt(_sr['nautilus_per_head'])} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['Nautilus insurance'])}**
+- LO/NHO/Kystrederiene = {fmt(_sr['lo_nho_per_head'])} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['LO/NHO/Kystrederiene'])}**
+- Norsk Maritim Kompetanse = {fmt(_sr['norsk_maritim_per_head'])} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['Norsk Maritim Kompetanse'])}**
+- Gruppelivsforsikring = {fmt(_sr['gruppeliv_per_head'])} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['Gruppelivsforsikring'])}**
+- Certificates crew = {fmt(_sr['certificates_per_head'])} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['Certificates crew'])}**
+- Other personnel cost = {fmt(_sr['other_personnel_per_head'])} × {opexfolder_total_headcount:.0f} = **{fmt(_opexfolder_social_costs['Other personnel cost'])}**
+
+"Total yearly wages" and "Total salary above 7.1G" both come from the Grant scheme
+table above — see that table's own **"Show the equation"** panel for how those two
+figures are built, per rank, from headcount, monthly wage, and the 7.1G threshold.
+            """
+        )
+
+    st.markdown("**Estimated use of temps**")
+    opexfolder_temps_pct = stateful_number_input(
+        "Estimated use of temps (%, of total wages)", min_value=0.0, value=2.5, step=0.5,
+        key="opexfolder_temps_pct", disabled=locked
+    )
+    opexfolder_temps_cost = opexfolder_total_yearly_wages * (opexfolder_temps_pct / 100)
+
+    opexfolder_crewcost_total = (
+        opexfolder_total_yearly_wages + opexfolder_total_social_costs
+        + opexfolder_temps_cost - opexfolder_total_grant
+    )
+    st.markdown(
+        f"**Total crew cost** = Wages ({fmt(opexfolder_total_yearly_wages)}) + Social costs "
+        f"({fmt(opexfolder_total_social_costs)}) + Temps ({fmt(opexfolder_temps_cost)}) − "
+        f"Grant ({fmt(opexfolder_total_grant)}) = **{fmt(opexfolder_crewcost_total)}**"
+    )
+
+    st.divider()
+    st.markdown("**Insurance**")
+    ic1, ic2, ic3 = st.columns(3)
+    with ic1:
+        opexfolder_hull_machinery_pct = stateful_number_input(
+            "Hull Machinery rate (%, of 80% of vessel value)", min_value=0.0, value=0.3, step=0.05,
+            key="opexfolder_hull_pct", disabled=locked
+        )
+        opexfolder_hi_pct = stateful_number_input(
+            "HI rate (%, of 20% of vessel value)", min_value=0.0, value=0.16, step=0.01,
+            key="opexfolder_hi_pct", disabled=locked
+        )
+    with ic2:
+        opexfolder_fi_pct = stateful_number_input(
+            "FI rate (%, of 20% of vessel value)", min_value=0.0, value=0.16, step=0.01,
+            key="opexfolder_fi_pct", disabled=locked
+        )
+        opexfolder_pi_flat = nok_input(
+            "P&I (NOK, flat)", "opexfolder_pi_flat", 100_000.0, key="opexfolder_pi_input", disabled=locked
+        )
+    with ic3:
+        opexfolder_war_flat = nok_input(
+            "War & Equipment (NOK, flat)", "opexfolder_war_flat", 16_000.0, key="opexfolder_war_input", disabled=locked
+        )
+
+    _opexfolder_insurance = {
+        "Hull Machinery": opexfolder_vessel_value * 0.8 * (opexfolder_hull_machinery_pct / 100),
+        "HI": opexfolder_vessel_value * 0.2 * (opexfolder_hi_pct / 100),
+        "FI": opexfolder_vessel_value * 0.2 * (opexfolder_fi_pct / 100),
+        "P&I": opexfolder_pi_flat,
+        "War & Equipment": opexfolder_war_flat,
+    }
+    opexfolder_insurance_total = sum(_opexfolder_insurance.values())
+    insurance_df = pd.DataFrame(
+        [{"Item": k, "Annual cost (NOK)": v} for k, v in _opexfolder_insurance.items()]
+        + [{"Item": "Total", "Annual cost (NOK)": opexfolder_insurance_total}]
+    )
+    show_table(insurance_df, "Item", width="stretch")
+
+    st.divider()
+    st.markdown("**Other vessel cost** (cost-code breakdown)")
+    if "opexfolder_other_vessel_cost" not in st.session_state:
+        st.session_state.opexfolder_other_vessel_cost = [
+            {"code": 4100, "name": "Ship general", "value_nok": 450_000.0},
+            {"code": 4110, "name": "Ship repair & maintenance", "value_nok": 2_800_000.0},
+            {"code": 4200, "name": "Hull", "value_nok": 0.0},
+            {"code": 4300, "name": "Equipment for cargo", "value_nok": 0.0},
+            {"code": 4400, "name": "Ship equipment", "value_nok": 0.0},
+            {"code": 4500, "name": "Equipment for crew and passenger", "value_nok": 0.0},
+            {"code": 4600, "name": "Machinery main components", "value_nok": 0.0},
+            {"code": 4700, "name": "System for machinery", "value_nok": 0.0},
+            {"code": 4800, "name": "Ship common system", "value_nok": 0.0},
+        ]
+
+    def _add_other_cost_row():
+        st.session_state.opexfolder_other_vessel_cost.append({"code": 0, "name": "New item", "value_nok": 0.0})
+
+    def _remove_other_cost_row(index):
+        st.session_state.opexfolder_other_vessel_cost.pop(index)
+
+    def _on_other_cost_value_change(index):
+        raw = st.session_state[f"opexfolder_other_value_{index}"]
+        value = parse_nok(raw)
+        st.session_state.opexfolder_other_vessel_cost[index]["value_nok"] = value
+        st.session_state[f"opexfolder_other_value_{index}"] = format_nok(value)
+
+    ohdr = st.columns([0.7, 1.8, 1.2, 0.4])
+    ohdr[0].markdown("**Code**")
+    ohdr[1].markdown("**Name**")
+    ohdr[2].markdown("**Annual cost (NOK)**")
+
+    for i, item in enumerate(st.session_state.opexfolder_other_vessel_cost):
+        c1, c2, c3, c4 = st.columns([0.7, 1.8, 1.2, 0.4])
+        with c1:
+            item["code"] = st.number_input(
+                "Code", min_value=0, value=item["code"], step=100,
+                key=f"opexfolder_other_code_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c2:
+            item["name"] = st.text_input(
+                "Name", value=item["name"], key=f"opexfolder_other_name_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c3:
+            _other_value_display_key = f"opexfolder_other_value_{i}"
+            if _other_value_display_key not in st.session_state:
+                st.session_state[_other_value_display_key] = format_nok(item["value_nok"])
+            st.text_input(
+                "Annual cost", key=_other_value_display_key, label_visibility="collapsed",
+                on_change=_on_other_cost_value_change, args=(i,), disabled=locked
+            )
+        with c4:
+            st.button("✕", key=f"opexfolder_other_remove_{i}", on_click=_remove_other_cost_row, args=(i,), disabled=locked)
+
+    st.button("+ Add cost code", key="opexfolder_other_add_code", on_click=_add_other_cost_row, disabled=locked)
+
+    opexfolder_other_vessel_cost_total = sum(item["value_nok"] for item in st.session_state.opexfolder_other_vessel_cost)
+    st.markdown(f"**Total other vessel cost:** {fmt(opexfolder_other_vessel_cost_total)}")
+
+    st.divider()
+    st.markdown("**Summary**")
+    opexfolder_grand_total = opexfolder_crewcost_total + opexfolder_insurance_total + opexfolder_other_vessel_cost_total
+    sm1, sm2, sm3, sm4 = st.columns(4)
+    sm1.metric("Crew cost", fmt(opexfolder_crewcost_total))
+    sm2.metric("Insurance", fmt(opexfolder_insurance_total))
+    sm3.metric("Other vessel cost", fmt(opexfolder_other_vessel_cost_total))
+    sm4.metric("Total vessel opex", fmt(opexfolder_grand_total))
+
+    _opexfolder_push_map = {
+        "Crewing": opexfolder_crewcost_total,
+        "Insurance": opexfolder_insurance_total,
+        "Other vessel opex": opexfolder_other_vessel_cost_total,
+    }
+
+    def _sync_opex_totals_to_tab1():
+        for _name, _value in _opexfolder_push_map.items():
+            _existing = next((it for it in st.session_state.opex_items if it["name"] == _name), None)
+            if _existing is not None:
+                _existing["value_nok"] = _value
+            else:
+                st.session_state.opex_items.append({"name": _name, "value_nok": _value})
+            # Tab 1's own "value_{i}" text widgets already rendered earlier
+            # in this same pass, so their session_state can't be SET
+            # directly here (Streamlit forbids assigning to an
+            # already-instantiated widget's key within the same run —
+            # same class of issue as the button-key bug fixed earlier).
+            # Deleting the stale entry instead is safe, and lets Tab 1's
+            # own "if key not in session_state: initialize from
+            # item['value_nok']" logic correctly re-populate it fresh on
+            # the next pass (triggered by _request_rerun() below).
+            for _idx, _it in enumerate(st.session_state.opex_items):
+                if _it["name"] == _name and f"value_{_idx}" in st.session_state:
+                    del st.session_state[f"value_{_idx}"]
+
+    if opex_linked_to_vessel_opex_tab:
+        st.caption(
+            "**Linked** — Crewing, Insurance, and Other vessel opex on Tab "
+            "1 update automatically from the totals above (creating them "
+            "if they don't already exist). Tab 1's value fields for these "
+            "three are disabled while linked; turn the link off on Tab 1 "
+            "to edit them manually there again."
+        )
+        _tab1_currently_matches = all(
+            next((it["value_nok"] for it in st.session_state.opex_items if it["name"] == _name), None) == _value
+            for _name, _value in _opexfolder_push_map.items()
+        )
+        _opex_sync_retry_count = st.session_state.get("_opex_sync_retry_count", 0)
+        if not _tab1_currently_matches and _opex_sync_retry_count < 4:
+            st.session_state["_opex_sync_retry_count"] = _opex_sync_retry_count + 1
+            _sync_opex_totals_to_tab1()
+            _request_rerun()
+        else:
+            st.session_state["_opex_sync_retry_count"] = 0
+    else:
+        st.caption(
+            "**Not linked** — Tab 1's Crewing/Insurance/Other vessel opex "
+            "are independently editable there and won't update from the "
+            "totals above automatically. Turn the link on there, or use "
+            "the button below for a one-off manual sync without turning "
+            "the link on."
+        )
+        if st.button("Push totals to Tab 1's vessel opex (one-off)", disabled=locked):
+            _sync_opex_totals_to_tab1()
+            st.success("Pushed to Tab 1 — Crewing, Insurance, and Other vessel opex updated.")
+            _request_rerun()
+
+# ===========================================================================
+# TAB 1.75 — Construction capex (currency-converted capex build-up, and the
+#            equity-first installment waterfall with two-tranche debt —
+#            construction debt for installments 1..N-1, take-out debt for
+#            the final installment. Core waterfall only for now; day-count
+#            fee accrual — commitment/counter-guarantee/take-out-guarantee
+#            fees — is a planned follow-up, not built here yet.)
+# ===========================================================================
+with tab_construction:
+    st.subheader("Construction capex & finance")
+    st.caption(
+        "Currency-converted capex build-up, and the installment waterfall "
+        "to the yard — equity funds each installment first, up to "
+        "however much is available; once equity runs out, construction "
+        "debt covers the rest. The final installment is different: it's "
+        "funded entirely by a separate take-out debt facility (which "
+        "refinances/replaces the construction debt at delivery), not by "
+        "the equity-first waterfall. Works with anywhere from 2 to 6 "
+        "installments — construction debt only ever covers up to "
+        "whichever installment sits second-to-last, however many there are."
+    )
+
+    st.markdown("**FX rates** (NOK per unit of foreign currency)")
+    fxc1, fxc2, fxc3, fxc4, fxc5 = st.columns(5)
+    with fxc1:
+        construction_fx_eur = stateful_number_input(
+            "EUR/NOK", min_value=0.0, value=11.65, step=0.05,
+            key="construction_fx_eur", disabled=locked
+        )
+    with fxc2:
+        construction_fx_usd = stateful_number_input(
+            "USD/NOK", min_value=0.0, value=10.70, step=0.05,
+            key="construction_fx_usd", disabled=locked
+        )
+    with fxc3:
+        construction_fx_gbp = stateful_number_input(
+            "GBP/NOK", min_value=0.0, value=13.50, step=0.05,
+            key="construction_fx_gbp", disabled=locked
+        )
+    with fxc4:
+        construction_fx_cad = stateful_number_input(
+            "CAD/NOK", min_value=0.0, value=7.70, step=0.05,
+            key="construction_fx_cad", disabled=locked
+        )
+    with fxc5:
+        construction_fx_clp = stateful_number_input(
+            "CLP/NOK", min_value=0.0, value=0.011, step=0.001, format="%.4f",
+            key="construction_fx_clp", disabled=locked
+        )
+    _construction_fx_lookup = {
+        "NOK": 1.0, "EUR": construction_fx_eur, "USD": construction_fx_usd,
+        "GBP": construction_fx_gbp, "CAD": construction_fx_cad, "CLP": construction_fx_clp,
+    }
+
+    st.markdown("**Capex items subject to the installment schedule** (yard contract and related)")
+    st.caption(
+        "These items sum to the 'installment capex' that gets split "
+        "across the installment schedule below. Each item has its own "
+        "currency, converted to NOK at the rates above."
+    )
+    if "construction_capex_items" not in st.session_state:
+        st.session_state.construction_capex_items = [
+            {"name": "Yard contract", "currency": "EUR", "amount": 59_000_000.0},
+            {"name": "RO plant", "currency": "EUR", "amount": 4_000_000.0},
+            {"name": "Delicer", "currency": "EUR", "amount": 0.0},
+            {"name": "Contingencies", "currency": "EUR", "amount": 0.0},
+        ]
+
+    def _add_construction_capex_item():
+        st.session_state.construction_capex_items.append({"name": "New item", "currency": "NOK", "amount": 0.0})
+
+    def _remove_construction_capex_item(index):
+        st.session_state.construction_capex_items.pop(index)
+
+    def _on_construction_capex_amount_change(index):
+        raw = st.session_state[f"construction_capex_amount_{index}"]
+        value = parse_nok(raw)
+        st.session_state.construction_capex_items[index]["amount"] = value
+        st.session_state[f"construction_capex_amount_{index}"] = format_nok(value)
+
+    cchdr = st.columns([1.8, 1.0, 1.4, 1.4, 0.4])
+    cchdr[0].markdown("**Name**")
+    cchdr[1].markdown("**Currency**")
+    cchdr[2].markdown("**Amount (in currency)**")
+    cchdr[3].markdown("**NOK value**")
+
+    _construction_installment_capex_nok = 0.0
+    _construction_capex_items_nok = []
+    for i, item in enumerate(st.session_state.construction_capex_items):
+        c1, c2, c3, c4, c5 = st.columns([1.8, 1.0, 1.4, 1.4, 0.4])
+        with c1:
+            item["name"] = st.text_input(
+                "Name", value=item["name"], key=f"construction_capex_name_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c2:
+            item["currency"] = st.selectbox(
+                "Currency", ["NOK", "EUR", "USD", "GBP", "CAD", "CLP"],
+                index=["NOK", "EUR", "USD", "GBP", "CAD", "CLP"].index(item["currency"]),
+                key=f"construction_capex_currency_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c3:
+            _capex_amount_display_key = f"construction_capex_amount_{i}"
+            if _capex_amount_display_key not in st.session_state:
+                st.session_state[_capex_amount_display_key] = format_nok(item["amount"])
+            st.text_input(
+                "Amount", key=_capex_amount_display_key, label_visibility="collapsed",
+                on_change=_on_construction_capex_amount_change, args=(i,), disabled=locked
+            )
+        with c4:
+            _item_nok_value = item["amount"] * _construction_fx_lookup.get(item["currency"], 1.0)
+            st.markdown(f"<div style='padding-top:8px'>{fmt(_item_nok_value)}</div>", unsafe_allow_html=True)
+        with c5:
+            st.button("✕", key=f"construction_capex_remove_{i}", on_click=_remove_construction_capex_item, args=(i,), disabled=locked)
+        _construction_installment_capex_nok += _item_nok_value
+        _construction_capex_items_nok.append({"name": item["name"], "nok_value": _item_nok_value})
+
+    st.button("+ Add capex item", key="construction_capex_add_item", on_click=_add_construction_capex_item, disabled=locked)
+    st.markdown(f"**Total installment capex:** {fmt(_construction_installment_capex_nok)}")
+
+    st.markdown("**Non-installment capitalized costs** (always equity-funded, spread evenly across installments)")
+    st.caption(
+        "Project management, legal costs, and similar — capitalized, but "
+        "not part of the yard-contract waterfall. Always equity, split "
+        "evenly across however many installments exist below."
+    )
+    if "construction_other_costs" not in st.session_state:
+        st.session_state.construction_other_costs = [
+            {"name": "Project management", "amount_nok": 9_000_000.0},
+            {"name": "Legal & owner's supply", "amount_nok": 4_500_000.0},
+        ]
+
+    def _add_construction_other_cost():
+        st.session_state.construction_other_costs.append({"name": "New item", "amount_nok": 0.0})
+
+    def _remove_construction_other_cost(index):
+        st.session_state.construction_other_costs.pop(index)
+
+    def _on_construction_other_cost_change(index):
+        raw = st.session_state[f"construction_other_amount_{index}"]
+        value = parse_nok(raw)
+        st.session_state.construction_other_costs[index]["amount_nok"] = value
+        st.session_state[f"construction_other_amount_{index}"] = format_nok(value)
+
+    ochdr = st.columns([2.4, 1.6, 0.4])
+    ochdr[0].markdown("**Name**")
+    ochdr[1].markdown("**Amount (NOK)**")
+
+    _construction_other_capex_nok = 0.0
+    for i, item in enumerate(st.session_state.construction_other_costs):
+        c1, c2, c3 = st.columns([2.4, 1.6, 0.4])
+        with c1:
+            item["name"] = st.text_input(
+                "Name", value=item["name"], key=f"construction_other_name_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c2:
+            _other_amount_display_key = f"construction_other_amount_{i}"
+            if _other_amount_display_key not in st.session_state:
+                st.session_state[_other_amount_display_key] = format_nok(item["amount_nok"])
+            st.text_input(
+                "Amount", key=_other_amount_display_key, label_visibility="collapsed",
+                on_change=_on_construction_other_cost_change, args=(i,), disabled=locked
+            )
+        with c3:
+            st.button("✕", key=f"construction_other_remove_{i}", on_click=_remove_construction_other_cost, args=(i,), disabled=locked)
+        _construction_other_capex_nok += item["amount_nok"]
+
+    st.button("+ Add item", key="construction_other_add_item", on_click=_add_construction_other_cost, disabled=locked)
+    st.markdown(f"**Total non-installment capex:** {fmt(_construction_other_capex_nok)}")
+
+    _construction_total_capitalized_nok = _construction_installment_capex_nok + _construction_other_capex_nok
+    st.markdown(f"**Total capitalized cost (excl. construction finance cost & guarantee premium):** {fmt(_construction_total_capitalized_nok)}")
+
+    _construction_finance_cost_prev_pass = st.session_state.get("_construction_finance_cost_total", 0.0)
+    _construction_guarantee_premium_prev_pass = st.session_state.get("_construction_guarantee_premium_total", 0.0)
+    st.markdown(
+        f"**Total capitalized cost, incl. construction finance cost & guarantee premium:** "
+        f"{fmt(_construction_total_capitalized_nok + _construction_finance_cost_prev_pass + _construction_guarantee_premium_prev_pass)}"
+    )
+    st.caption(
+        "Construction finance cost and the guarantee premium are both "
+        "computed further down (they depend on the installment schedule "
+        "and debt waterfall below), so this figure is one script pass "
+        "behind after changing debt, installment, or fee-rate inputs — "
+        "it catches up automatically; switch tabs or click Refresh in "
+        "the sidebar if it looks stale."
+    )
+
+    st.divider()
+    st.markdown("**Debt sizing**")
+    construction_total_debt_nok = nok_input(
+        "Total debt (NOK)", "construction_total_debt_nok", 576_000_000.0,
+        key="construction_total_debt_input", disabled=locked
+    )
+    _construction_yard_contract_item = next(
+        (it for it in st.session_state.construction_capex_items if it["name"] == "Yard contract"), None
+    )
+    _construction_yard_contract_nok = (
+        _construction_yard_contract_item["amount"] * _construction_fx_lookup.get(_construction_yard_contract_item["currency"], 1.0)
+        if _construction_yard_contract_item is not None else 0.0
+    )
+    _construction_ltv1 = (construction_total_debt_nok / _construction_yard_contract_nok) if _construction_yard_contract_nok else 0.0
+    _construction_ltv2 = (construction_total_debt_nok / _construction_total_capitalized_nok) if _construction_total_capitalized_nok else 0.0
+    dc1, dc2, dc3 = st.columns(3)
+    dc1.metric("LTV1 — debt / yard contract", f"{_construction_ltv1:.1%}")
+    dc2.metric("LTV2 — debt / total capitalized cost", f"{_construction_ltv2:.1%}")
+    _construction_total_equity_nok = _construction_total_capitalized_nok - construction_total_debt_nok
+    dc3.metric("Total equity for capex", fmt(_construction_total_equity_nok))
+    if _construction_total_equity_nok < 0:
+        st.warning(
+            f"⚠️ Debt ({fmt(construction_total_debt_nok)}) exceeds total capitalized cost "
+            f"({fmt(_construction_total_capitalized_nok)}) — equity would be negative. Check your inputs."
+        )
+
+    st.divider()
+    st.markdown("**Installment schedule** (2 to 6 installments — the last one is always take-out financing)")
+    st.caption(
+        "Each installment is a share of the installment capex above — "
+        "shares should sum to 100%. The last row is always treated as "
+        "take-out financing: funded entirely by a dedicated take-out "
+        "debt facility, not the equity-first waterfall used for every "
+        "other installment. Add or remove rows freely between 2 and 6."
+    )
+    if "construction_installments" not in st.session_state:
+        st.session_state.construction_installments = [
+            {"share_pct": 20.0, "month": 0.0},
+            {"share_pct": 20.0, "month": 7.5},
+            {"share_pct": 20.0, "month": 15.0},
+            {"share_pct": 20.0, "month": 22.5},
+            {"share_pct": 20.0, "month": 30.0},
+        ]
+
+    def _add_construction_installment():
+        if len(st.session_state.construction_installments) < 6:
+            st.session_state.construction_installments.append({"share_pct": 0.0, "month": 0.0})
+
+    def _remove_construction_installment(index):
+        if len(st.session_state.construction_installments) > 2:
+            st.session_state.construction_installments.pop(index)
+
+    _construction_n_installments = len(st.session_state.construction_installments)
+    ishdr = st.columns([1.6, 1.0, 1.0, 0.4])
+    ishdr[0].markdown("**Installment**")
+    ishdr[1].markdown("**Share of installment capex (%)**")
+    ishdr[2].markdown("**Month**")
+
+    for i, inst in enumerate(st.session_state.construction_installments):
+        is_last = (i == _construction_n_installments - 1)
+        _label = "Take-out-financing" if is_last else f"{i + 1}{'st' if i == 0 else 'nd' if i == 1 else 'rd' if i == 2 else 'th'} yard-installment"
+        c1, c2, c3, c4 = st.columns([1.6, 1.0, 1.0, 0.4])
+        with c1:
+            st.markdown(f"<div style='padding-top:8px'>{_label}</div>", unsafe_allow_html=True)
+        with c2:
+            inst["share_pct"] = st.number_input(
+                "Share (%)", min_value=0.0, max_value=100.0, value=inst["share_pct"], step=1.0,
+                key=f"construction_installment_share_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c3:
+            inst["month"] = st.number_input(
+                "Month", min_value=0.0, value=inst["month"], step=0.5,
+                key=f"construction_installment_month_{i}", label_visibility="collapsed", disabled=locked
+            )
+        with c4:
+            if _construction_n_installments > 2:
+                st.button("✕", key=f"construction_installment_remove_{i}", on_click=_remove_construction_installment, args=(i,), disabled=locked)
+
+    _install_add_col1, _install_add_col2 = st.columns([1, 3])
+    with _install_add_col1:
+        if _construction_n_installments < 6:
+            st.button("+ Add installment", key="construction_installment_add_row", on_click=_add_construction_installment, disabled=locked)
+        else:
+            st.caption("Maximum of 6 installments reached.")
+
+    _construction_share_sum = sum(inst["share_pct"] for inst in st.session_state.construction_installments)
+    if abs(_construction_share_sum - 100.0) > 0.5:
+        st.warning(f"⚠️ Shares sum to {_construction_share_sum:.1f}%, not 100%.")
+
+    # --- the waterfall: equity funds each installment (except the last)
+    # first, up to whatever's left; debt covers the rest. The last
+    # installment is funded 100% by take-out debt, by definition — not
+    # subject to the equity-first rule, regardless of how much equity
+    # happens to remain at that point. Uses "installment capex minus total
+    # debt" as its OWN equity pool — NOT total equity (which also nets
+    # off PM/Legal's equity draw) — since PM/Legal is tracked separately
+    # and doesn't compete with the yard-installment waterfall for the
+    # same funding pool (matches the source file's own G41 = E41-H41,
+    # using installment-capex specifically, not the overall capitalized
+    # cost). ---
+    _construction_installment_equity_pool = _construction_installment_capex_nok - construction_total_debt_nok
+    _construction_remaining_equity = _construction_installment_equity_pool
+    _construction_waterfall_rows = []
+    _construction_construction_debt_draws = []
+    _construction_takeout_debt_amount = 0.0
+    for i, inst in enumerate(st.session_state.construction_installments):
+        is_last = (i == _construction_n_installments - 1)
+        _label = "Take-out-financing" if is_last else f"{i + 1}{'st' if i == 0 else 'nd' if i == 1 else 'rd' if i == 2 else 'th'} yard-installment"
+        _amount = _construction_installment_capex_nok * (inst["share_pct"] / 100)
+        if is_last:
+            _equity_portion = 0.0
+            _debt_portion = _amount
+            _construction_takeout_debt_amount = _amount
+        else:
+            _equity_portion = min(_construction_remaining_equity, _amount)
+            _debt_portion = _amount - _equity_portion
+            _construction_remaining_equity -= _equity_portion
+            _construction_construction_debt_draws.append(_debt_portion)
+        _construction_waterfall_rows.append({
+            "Installment": _label, "Month": inst["month"], "Amount": _amount,
+            "Equity": _equity_portion, "Debt": _debt_portion,
+        })
+
+    waterfall_df = pd.DataFrame(_construction_waterfall_rows)
+    show_table(waterfall_df, "Installment", width="stretch")
+
+    _construction_construction_debt_commitment = sum(_construction_construction_debt_draws)
+    st.markdown("**Debt tranches**")
+    tc1, tc2, tc3 = st.columns(3)
+    tc1.metric("Construction debt commitment", fmt(_construction_construction_debt_commitment))
+    tc2.metric("Take-out debt", fmt(_construction_takeout_debt_amount))
+    tc3.metric("Total debt (check)", fmt(_construction_construction_debt_commitment + _construction_takeout_debt_amount))
+    st.caption(
+        "Construction debt commitment = total debt minus the take-out "
+        "installment's amount — it only ever covers installments 1 "
+        "through the second-to-last, however many there are. Take-out "
+        "debt is the separate facility that funds the final installment "
+        "and refinances the construction debt at delivery."
+    )
+    _construction_debt_check = _construction_construction_debt_commitment + _construction_takeout_debt_amount
+    if abs(_construction_debt_check - construction_total_debt_nok) > 1.0:
+        st.warning(
+            f"⚠️ Construction debt + take-out debt ({fmt(_construction_debt_check)}) doesn't "
+            f"match total debt input ({fmt(construction_total_debt_nok)}) — this can happen if "
+            f"equity is negative or shares don't sum to 100%; check the inputs above."
+        )
+
+    st.divider()
+    st.markdown("**Construction finance cost**")
+    st.caption(
+        "Interest on the construction debt drawn at each installment, "
+        "accruing (simple interest, not compounding) from that "
+        "installment's own month until take-out (the last installment's "
+        "month) — the construction debt gets repaid/refinanced at that "
+        "point, so nothing accrues beyond it. Capitalized: added to "
+        "total capitalized cost below, since interest during "
+        "construction is normally added to the vessel's cost basis "
+        "rather than expensed as incurred. Rate is set independently "
+        "here, not linked to Tab 1 — useful since construction finance "
+        "is often in a different currency (e.g. a EUR loan) with its "
+        "own market rate."
+    )
+    cfc1, cfc2 = st.columns(2)
+    with cfc1:
+        construction_swap_rate_pct = stateful_number_input(
+            "Swap rate (%/yr)", min_value=0.0, value=4.0, step=0.1,
+            key="construction_swap_rate", disabled=locked
+        )
+    with cfc2:
+        construction_credit_spread_pct = stateful_number_input(
+            "Credit spread (%/yr)", min_value=0.0, value=3.5, step=0.1,
+            key="construction_credit_spread", disabled=locked
+        )
+    _construction_finance_cost_rate_pct = construction_swap_rate_pct + construction_credit_spread_pct
+    st.caption(f"Total construction finance cost rate: {_construction_finance_cost_rate_pct:.2f}%/yr.")
+
+    # --- computed AFTER the waterfall above has already fixed each
+    # installment's debt draw — finance cost here is purely a function of
+    # that fixed waterfall, never fed back into the debt sizing itself.
+    # Feeding it back would create exactly the kind of circular reference
+    # that appears to be what broke in the source workbook (#REF! errors
+    # cascading from this same section). ---
+    _construction_takeout_month = st.session_state.construction_installments[-1]["month"]
+    _construction_finance_cost_rows = []
+    _construction_finance_cost_total = 0.0
+    for i, _row in enumerate(_construction_waterfall_rows):
+        if i == _construction_n_installments - 1:
+            continue  # take-out installment itself doesn't accrue construction finance cost
+        _months_outstanding = max(0.0, _construction_takeout_month - _row["Month"])
+        _interest = _row["Debt"] * (_construction_finance_cost_rate_pct / 100) * (_months_outstanding / 12)
+        _construction_finance_cost_rows.append({
+            "Installment": _row["Installment"], "Debt drawn": _row["Debt"],
+            "Months outstanding": _months_outstanding, "Finance cost": _interest,
+        })
+        _construction_finance_cost_total += _interest
+
+    if _construction_finance_cost_rows:
+        finance_cost_df = pd.DataFrame(
+            _construction_finance_cost_rows
+            + [{"Installment": "Total", "Debt drawn": None, "Months outstanding": None, "Finance cost": _construction_finance_cost_total}]
+        )
+        show_table(finance_cost_df, "Installment", decimal_cols=["Months outstanding"], width="stretch")
+    st.metric("Total construction finance cost", fmt(_construction_finance_cost_total))
+
+    # --- store for the earlier "Total capitalized cost, incl. construction
+    # finance cost" display (above, before the waterfall this depends on
+    # has even run) — self-healing: if it just changed, trigger one more
+    # pass so that earlier display catches up immediately rather than
+    # waiting for the user to switch tabs or click Refresh. ---
+    _construction_finance_cost_changed = (
+        abs(st.session_state.get("_construction_finance_cost_total", 0.0) - _construction_finance_cost_total) > 1.0
+    )
+    st.session_state["_construction_finance_cost_total"] = _construction_finance_cost_total
+    _construction_fc_retry_count = st.session_state.get("_construction_fc_retry_count", 0)
+    if _construction_finance_cost_changed and _construction_fc_retry_count < 4:
+        st.session_state["_construction_fc_retry_count"] = _construction_fc_retry_count + 1
+        _request_rerun()
+    else:
+        st.session_state["_construction_fc_retry_count"] = 0
+
+    st.divider()
+    st.markdown("**Guarantee premium on unutilized construction debt**")
+    st.caption(
+        "The construction debt commitment is a facility, not a lump sum "
+        "— only the part actually drawn earns interest (the finance "
+        "cost above); the undrawn remainder still costs a guarantee "
+        "premium for keeping the facility available. As each "
+        "installment draws more of the facility, the unutilized balance "
+        "steps down, so the premium accrues period by period at a "
+        "shrinking base — reaching zero once the facility is fully "
+        "drawn (which happens at the last yard-installment, one before "
+        "take-out)."
+    )
+    construction_guarantee_premium_pct = stateful_number_input(
+        "Guarantee premium rate (%/yr, of unutilized construction debt)", min_value=0.0, value=1.35, step=0.05,
+        key="construction_guarantee_premium_rate", disabled=locked
+    )
+
+    _construction_guarantee_rows = []
+    _construction_guarantee_premium_total = 0.0
+    _construction_cumulative_drawn = 0.0
+    for i in range(_construction_n_installments - 1):  # excludes take-out itself
+        _construction_cumulative_drawn += _construction_waterfall_rows[i]["Debt"]
+        _unutilized = max(0.0, _construction_construction_debt_commitment - _construction_cumulative_drawn)
+        _period_start_month = st.session_state.construction_installments[i]["month"]
+        _period_end_month = st.session_state.construction_installments[i + 1]["month"]
+        _period_months = max(0.0, _period_end_month - _period_start_month)
+        _premium_this_period = _unutilized * (construction_guarantee_premium_pct / 100) * (_period_months / 12)
+        _construction_guarantee_rows.append({
+            "Period": f"After {_construction_waterfall_rows[i]['Installment']}",
+            "Cumulative drawn": _construction_cumulative_drawn,
+            "Unutilized": _unutilized,
+            "Months in period": _period_months,
+            "Guarantee premium": _premium_this_period,
+        })
+        _construction_guarantee_premium_total += _premium_this_period
+
+    if _construction_guarantee_rows:
+        guarantee_df = pd.DataFrame(
+            _construction_guarantee_rows
+            + [{"Period": "Total", "Cumulative drawn": None, "Unutilized": None, "Months in period": None, "Guarantee premium": _construction_guarantee_premium_total}]
+        )
+        show_table(guarantee_df, "Period", decimal_cols=["Months in period"], width="stretch")
+    st.metric("Total guarantee premium", fmt(_construction_guarantee_premium_total))
+
+    # --- same one-pass-behind, self-healing storage as finance cost above ---
+    _construction_guarantee_changed = (
+        abs(st.session_state.get("_construction_guarantee_premium_total", 0.0) - _construction_guarantee_premium_total) > 1.0
+    )
+    st.session_state["_construction_guarantee_premium_total"] = _construction_guarantee_premium_total
+    _construction_gp_retry_count = st.session_state.get("_construction_gp_retry_count", 0)
+    if _construction_guarantee_changed and _construction_gp_retry_count < 4:
+        st.session_state["_construction_gp_retry_count"] = _construction_gp_retry_count + 1
+        _request_rerun()
+    else:
+        st.session_state["_construction_gp_retry_count"] = 0
+
+    _construction_total_capitalized_incl_finance_nok = (
+        _construction_total_capitalized_nok + _construction_finance_cost_total + _construction_guarantee_premium_total
+    )
+    st.markdown(
+        f"**Total capitalized cost, incl. construction finance cost & guarantee premium:** "
+        f"{fmt(_construction_total_capitalized_incl_finance_nok)}"
+    )
+    st.caption(
+        "This is the full implied vessel capex once construction "
+        "finance cost and the guarantee premium are both capitalized on "
+        "top — carried through into the Sources & uses check below, "
+        "funded by additional equity. Neither is fed back into the "
+        "installment waterfall or debt sizing above, though — the "
+        "waterfall only depends on installment capex and total debt, "
+        "both fixed before either fee is even calculated, so there's no "
+        "circularity in adding them here. If you want this larger "
+        "figure reflected as Tab 1's vessel capex, update it there "
+        "directly."
+    )
+
+    st.divider()
+    st.markdown("**Sources & uses check**")
+    st.caption(
+        "Includes construction finance cost and the guarantee premium "
+        "as part of the capitalized cost of completing the vessel — "
+        "both funded by additional equity, since debt stays fixed at "
+        "whatever you've set above (same treatment as Project "
+        "management/Legal). This is what pushes the total above the "
+        "installment-capex-only figure."
+    )
+    _construction_other_equity_nok = _construction_other_capex_nok  # always equity, per the caption above
+    _construction_installment_equity_used = _construction_installment_equity_pool - _construction_remaining_equity
+    su1, su2 = st.columns(2)
+    with su1:
+        st.markdown("**Uses**")
+        uses_df = pd.DataFrame(
+            [{"Item": _it["name"], "Amount": _it["nok_value"]} for _it in _construction_capex_items_nok]
+            + [
+                {"Item": "Non-installment capex (PM, legal, etc.)", "Amount": _construction_other_capex_nok},
+                {"Item": "Construction finance cost", "Amount": _construction_finance_cost_total},
+                {"Item": "Guarantee premium", "Amount": _construction_guarantee_premium_total},
+                {"Item": "Total uses", "Amount": _construction_total_capitalized_incl_finance_nok},
+            ]
+        )
+        show_table(uses_df, "Item", width="stretch")
+    with su2:
+        st.markdown("**Sources**")
+        sources_df = pd.DataFrame([
+            {"Item": "Construction debt", "Amount": _construction_construction_debt_commitment},
+            {"Item": "Take-out debt", "Amount": _construction_takeout_debt_amount},
+            {"Item": "Equity (installments)", "Amount": _construction_installment_equity_used},
+            {"Item": "Equity (non-installment costs)", "Amount": _construction_other_equity_nok},
+            {"Item": "Equity (construction finance cost)", "Amount": _construction_finance_cost_total},
+            {"Item": "Equity (guarantee premium)", "Amount": _construction_guarantee_premium_total},
+            {"Item": "Unused equity", "Amount": max(0.0, _construction_remaining_equity)},
+            {"Item": "Total sources", "Amount": (
+                _construction_construction_debt_commitment + _construction_takeout_debt_amount
+                + _construction_installment_equity_used + _construction_other_equity_nok
+                + _construction_finance_cost_total + _construction_guarantee_premium_total
+                + max(0.0, _construction_remaining_equity)
+            )},
+        ])
+        show_table(sources_df, "Item", width="stretch")
+
+# ===========================================================================
 # TAB 1b — Spot market (alternative revenue basis, with transparent
 #          voyage cost recovery)
 # ===========================================================================
@@ -858,7 +1912,7 @@ with tab_spot:
 
     if "spot_service_items" not in st.session_state:
         st.session_state.spot_service_items = [
-            {"name": "Treatment of fish", "share_pct": 70.0, "rate_nok_day": 819_000.0, "escalator_pct": 3.0, "priced_at_baseline": False},
+            {"name": "Treatment of fish", "share_pct": 70.0, "rate_nok_day": 785_000.0, "escalator_pct": 3.0, "priced_at_baseline": False},
             {"name": "Smolt transport", "share_pct": 20.0, "rate_nok_day": 456_000.0, "escalator_pct": 2.0, "priced_at_baseline": False},
             {"name": "Harvest transport", "share_pct": 10.0, "rate_nok_day": 456_000.0, "escalator_pct": 2.0, "priced_at_baseline": False},
         ]
@@ -1083,6 +2137,33 @@ with tab_spot:
     bl2.metric("Utilization (input)", f"{spot_utilization_pct:.1f}%")
     bl3.metric("Required NET rate on working days", fmt(required_net_rate_at_utilization) + "/day")
     bl4.metric("Required GROSS price (net + voyage opex)", fmt(required_gross_rate_at_utilization) + "/day")
+
+    # --- Variable Voyage opex (Smolt/Harvest/Treatment build-up tools)
+    # is computed further down the page, so it's read one-pass-behind
+    # here, same convention as spot_baseline_tc_daily above. ---
+    _spot_variable_voyage_opex_prev_pass = st.session_state.get("_spot_variable_voyage_opex_total", 0.0)
+    _required_annual_net = spot_baseline_tc_daily * operating_days
+    _required_annual_gross = _required_annual_net + spot_opex_annual_nok + _spot_variable_voyage_opex_prev_pass
+    st.markdown("**Required spot income, annual** (TC + Lease benchmark, converted to what spot has to earn)")
+    bla1, bla2, bla3, bla4 = st.columns(4)
+    bla1.metric("TC + Lease benchmark (net)", fmt(_required_annual_net))
+    bla2.metric("+ Fixed Voyage opex", fmt(spot_opex_annual_nok))
+    bla3.metric("+ Variable Voyage opex", fmt(_spot_variable_voyage_opex_prev_pass))
+    bla4.metric("= Required spot income (gross)", fmt(_required_annual_gross))
+    st.caption(
+        "This is the number Smolt + Harvest + Treatment revenue "
+        "together need to hit — shown here directly so there's no need "
+        "to toggle spot mode off and check the Combined TC-rate tab to "
+        "find it. Same figure the Service mix table's own 'Target' line "
+        "further down checks your current service mix against. Variable "
+        "Voyage opex (fuel, phase costs, customer changeover — from the "
+        "Smolt/Harvest/Treatment build-up tools further down) is "
+        "computed later on the page, so this figure is one script pass "
+        "behind after changing build-up tool inputs — it catches up "
+        "automatically; switch tabs or click Refresh in the sidebar if "
+        "it looks stale."
+    )
+
     st.caption(
         f"= {fmt(vessel_tc_daily)}/day vessel (Tab 1) + "
         f"{fmt(spot_baseline_tc_daily - vessel_tc_daily)}/day leased equipment "
@@ -1116,7 +2197,9 @@ with tab_spot:
         st.session_state.spot_service_items[index]["rate_nok_day"] = value
         st.session_state[f"service_rate_{index}"] = format_nok(value)
 
-    shdr1, shdr2, shdr3, shdr4, shdr5, shdr6, shdr7, shdr8 = st.columns([1.4, 1.2, 0.9, 0.8, 1.1, 1.1, 1.3, 0.4])
+    shdr1, shdr2, shdr3, shdr4, shdr5, shdr6, shdr7, shdr8, shdr9, shdr10, shdr11 = st.columns(
+        [1.3, 1.1, 0.8, 0.7, 1.0, 1.0, 1.2, 0.9, 0.9, 1.2, 0.4]
+    )
     shdr1.markdown("**Service**")
     shdr2.markdown("**Share of working days (%)**")
     shdr3.markdown("**Days/year**")
@@ -1124,16 +2207,23 @@ with tab_spot:
     shdr5.markdown("**Priced at baseline?**")
     shdr6.markdown("**Rate (NOK/day)**")
     shdr7.markdown("**Annual revenue (NOK)**")
+    shdr8.markdown("**Rounds/year**")
+    shdr9.markdown("**Days/round**")
+    shdr10.markdown("**Payment/round (NOK)**")
 
     _sum_share = 0.0
     _sum_days = 0.0
     _sum_annual_revenue = 0.0
 
+    _service_round_hours = st.session_state.get("_service_round_hours", {})
+
     for i, item in enumerate(st.session_state.spot_service_items):
         item.setdefault("priced_at_baseline", False)
         item.setdefault("share_pct", 0.0)
         item.setdefault("escalator_pct", 0.0)
-        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1.4, 1.2, 0.9, 0.8, 1.1, 1.1, 1.3, 0.4])
+        c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = st.columns(
+            [1.3, 1.1, 0.8, 0.7, 1.0, 1.0, 1.2, 0.9, 0.9, 1.2, 0.4]
+        )
         with c1:
             item["name"] = st.text_input(
                 "Service", value=item["name"], key=f"service_name_{i}", label_visibility="collapsed",
@@ -1175,6 +2265,25 @@ with tab_spot:
             _row_annual_revenue = _row_rate * _days_this
             st.markdown(f"<div style='padding-top:8px'>{fmt(_row_annual_revenue)}</div>", unsafe_allow_html=True)
         with c8:
+            _hours_per_round_this = _service_round_hours.get(item["name"])
+            if _hours_per_round_this:
+                _rounds_this = (_days_this * 24) / _hours_per_round_this
+                st.markdown(f"<div style='padding-top:8px'>{_rounds_this:.1f}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='padding-top:8px'>—</div>", unsafe_allow_html=True)
+        with c9:
+            if _hours_per_round_this:
+                _days_per_round_this = _hours_per_round_this / 24
+                st.markdown(f"<div style='padding-top:8px'>{_days_per_round_this:.1f}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='padding-top:8px'>—</div>", unsafe_allow_html=True)
+        with c10:
+            if _hours_per_round_this:
+                _payment_per_round_this = _row_rate * _hours_per_round_this / 24
+                st.markdown(f"<div style='padding-top:8px'>{fmt(_payment_per_round_this)}</div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='padding-top:8px'>—</div>", unsafe_allow_html=True)
+        with c11:
             st.button("✕", key=f"service_remove_{i}", on_click=_remove_service_item, args=(i,), disabled=locked)
 
         _sum_share += item["share_pct"]
@@ -1191,7 +2300,7 @@ with tab_spot:
         )
 
     _sum_pct_of_year = (_sum_days / operating_days * 100) if operating_days else 0.0
-    tcol1, tcol2, tcol3, tcol4, tcol5 = st.columns([1.4, 1.2, 0.9, 0.8, 2.7])
+    tcol1, tcol2, tcol3, tcol4, tcol5 = st.columns([1.3, 1.1, 0.8, 0.7, 7.6])
     tcol1.markdown("**Total**")
     tcol2.markdown(f"**{_sum_share:.1f}%**")
     tcol3.markdown(f"**{fmt(_sum_days)}**")
@@ -1199,13 +2308,17 @@ with tab_spot:
     tcol5.markdown(f"**{fmt(_sum_annual_revenue)}** (revenue only, excl. opex and price-list build-up)")
 
     _target_net_annual = spot_baseline_tc_daily * operating_days
-    _target_gross_annual = _target_net_annual + spot_opex_annual_nok
+    _target_gross_annual = _target_net_annual + spot_opex_annual_nok + _spot_variable_voyage_opex_prev_pass
     _target_delta = _sum_annual_revenue - _target_gross_annual
     st.caption(
         f"Target: {fmt(_target_net_annual)} net (baseline TC-rate x operating days) + "
-        f"{fmt(spot_opex_annual_nok)} opex = **{fmt(_target_gross_annual)}** gross required. "
+        f"{fmt(spot_opex_annual_nok)} Fixed Voyage opex + "
+        f"{fmt(_spot_variable_voyage_opex_prev_pass)} Variable Voyage opex "
+        f"= **{fmt(_target_gross_annual)}** gross required. "
         f"Current total above: {fmt(_sum_annual_revenue)} "
-        f"({'+' if _target_delta >= 0 else ''}{fmt(_target_delta)} vs. target)."
+        f"({'+' if _target_delta >= 0 else ''}{fmt(_target_delta)} vs. target). "
+        f"Variable Voyage opex is one script pass behind (computed further "
+        f"down, in the build-up tools) — it catches up automatically."
     )
 
     spot_service_items_current = [
@@ -2038,10 +3151,40 @@ with tab_spot:
     st.caption(
         f"Days available for Treatment: {fmt(_treatment_days_available)} (from the Service mix table above) "
         f"x 24 hr = {fmt(_treatment_hours_available)} hours ÷ {fmt(_treatment_total_hours)} hours/round trip "
-        f"= {_treatment_trips_exact:.2f} rounds/year. This is a build-up tool — the resulting day-rate "
-        f"isn't wired into the Voyage costs table below yet; once you're happy with this and the "
-        f"Smolt/Harvest build-ups above, say so and I'll connect all three into the actual model."
+        f"= {_treatment_trips_exact:.2f} rounds/year."
     )
+
+    # --- combined Variable Voyage opex across all three build-up tools —
+    # stored here (self-healing, one-pass-behind) so the Baseline
+    # reference panel and Service mix Target line — both further UP the
+    # page, rendering before this point — can include it in the gross
+    # required-revenue benchmark. Fixed Voyage opex (the shared/
+    # unallocated crew-analog line) is tracked separately and stays out
+    # of this total. ---
+    _spot_variable_voyage_opex_total = (
+        _smolt_total_annual_voyage_cost + _harvest_total_annual_voyage_cost + _treatment_annual_voyage_cost
+    )
+    # Hours per round trip for each of the three build-up-tool-backed
+    # services — read by the Service mix table (further UP the page,
+    # same one-pass-behind convention) to derive Rounds/year and
+    # Payment/round per service.
+    _spot_round_hours = {
+        "Smolt transport": _smolt_total_hours,
+        "Harvest transport": _harvest_total_hours,
+        "Treatment of fish": _treatment_total_hours,
+    }
+    _spot_variable_voyage_opex_changed = (
+        abs(st.session_state.get("_spot_variable_voyage_opex_total", 0.0) - _spot_variable_voyage_opex_total) > 1.0
+        or st.session_state.get("_service_round_hours") != _spot_round_hours
+    )
+    st.session_state["_spot_variable_voyage_opex_total"] = _spot_variable_voyage_opex_total
+    st.session_state["_service_round_hours"] = _spot_round_hours
+    _spot_vvo_retry_count = st.session_state.get("_spot_vvo_retry_count", 0)
+    if _spot_variable_voyage_opex_changed and _spot_vvo_retry_count < 4:
+        st.session_state["_spot_vvo_retry_count"] = _spot_vvo_retry_count + 1
+        _request_rerun()
+    else:
+        st.session_state["_spot_vvo_retry_count"] = 0
 
     st.markdown("**Net income check — Treatment of fish**")
     st.caption(
@@ -2939,6 +4082,111 @@ with tab_financials:
                     f"— uplift vs. prior rate: **{uplift_pct:+.1f}%**"
                 )
 
+    st.divider()
+    st.subheader("Lease contract schedule (leased equipment)")
+    st.caption(
+        "The equipment (already purchased — see the Lease spread tab) can "
+        "be re-leased at a new price and its own indexation once the "
+        "current contract ends — up to 3 further terms, same mechanism as "
+        "the TC contract schedule above. Contract 1 is the customer lease "
+        "already defined on the Lease spread tab (length, rate, and "
+        "escalator all sourced from there — see the Escalators section "
+        "above for its escalator). Leave a renewal's length at 0 to skip "
+        "it; the final segment runs to the end of the same horizon used "
+        "throughout this tab. This only affects the 'Lease-revenue' line "
+        "— financing (Tab 2's bank loan) is unaffected and keeps running "
+        "on its own separate schedule."
+    )
+
+    lease_contracts = []
+    if lease_enabled:
+        lease_contracts.append({
+            "start": 1, "length": int(customer_term_months),
+            "base_monthly": lease_monthly_payment, "escalator_pct": lease_escalator_pct,
+        })
+    lease_next_start = int(customer_term_months) + 1
+
+    _lease_contract_defaults = {
+        2: {"length": 0, "rate": lease_monthly_payment * 12, "escalator": 0.0},
+        3: {"length": 0, "rate": lease_monthly_payment * 12, "escalator": 0.0},
+        4: {"length": None, "rate": lease_monthly_payment * 12, "escalator": 0.0},
+    }
+
+    if lease_enabled:
+        for i in (2, 3, 4):
+            lrcol1, lrcol2, lrcol3 = st.columns(3)
+            with lrcol1:
+                if i < 4:
+                    lease_renewal_length = stateful_number_input(
+                        f"Lease contract {i} length (months) — 0 to skip", min_value=0,
+                        value=_lease_contract_defaults[i]["length"],
+                        step=1, key=f"lease_contract{i}_length", disabled=locked
+                    )
+                else:
+                    lease_renewal_length = None
+                    st.markdown("Lease contract 4 runs to the end of the horizon (if reached)")
+            with lrcol2:
+                lease_renewal_rate = nok_input(
+                    f"Lease contract {i} new rate (NOK/year)", f"lease_contract{i}_rate_nok",
+                    _lease_contract_defaults[i]["rate"], key=f"lease_contract{i}_rate_input", disabled=locked
+                )
+            with lrcol3:
+                lease_renewal_escalator = stateful_number_input(
+                    f"Lease contract {i} escalator (%/yr)", min_value=-100.0,
+                    value=_lease_contract_defaults[i]["escalator"], step=0.5,
+                    key=f"lease_contract{i}_escalator", disabled=locked
+                )
+
+            if i < 4:
+                _length_int = int(lease_renewal_length)
+                if _length_int > 0 and lease_next_start <= horizon_months:
+                    lease_contracts.append({
+                        "start": lease_next_start, "length": _length_int,
+                        "base_monthly": lease_renewal_rate / 12, "escalator_pct": lease_renewal_escalator,
+                    })
+                    lease_next_start += _length_int
+            else:
+                _remaining = horizon_months - (lease_next_start - 1)
+                if _remaining > 0:
+                    lease_contracts.append({
+                        "start": lease_next_start, "length": _remaining,
+                        "base_monthly": lease_renewal_rate / 12, "escalator_pct": lease_renewal_escalator,
+                    })
+
+    def _revenue_for_lease_contracts(month):
+        """Same lookup pattern as _revenue_for_contracts (TC), but against
+        the lease_contracts schedule — each lease contract escalates from
+        its own start month, at its own escalator."""
+        for c in lease_contracts:
+            if c["start"] <= month < c["start"] + c["length"]:
+                months_into = month - c["start"] + 1
+                periods = (months_into - 1) // 12
+                factor = (1 + c["escalator_pct"] / 100) ** periods
+                return c["base_monthly"] * factor
+        return 0.0
+
+    def _lease_contract_active(month):
+        return any(c["start"] <= month < c["start"] + c["length"] for c in lease_contracts)
+
+    if lease_enabled and len(lease_contracts) > 1:
+        st.markdown("**Lease contract summary** (annualized rate, and uplift vs. the rate just before renewal)")
+        for i, c in enumerate(lease_contracts):
+            annual_rate = c["base_monthly"] * 12
+            if i == 0:
+                st.markdown(
+                    f"- Contract 1 (months {c['start']}–{c['start']+c['length']-1}): "
+                    f"{fmt(c['base_monthly'])}/month · {fmt(annual_rate)}/year"
+                )
+            else:
+                prev_rate_monthly = _revenue_for_lease_contracts(c["start"] - 1)
+                uplift_pct = (c["base_monthly"] / prev_rate_monthly - 1) * 100 if prev_rate_monthly else 0.0
+                end_label = c["start"] + c["length"] - 1
+                st.markdown(
+                    f"- Contract {i+1} (months {c['start']}–{end_label}): "
+                    f"{fmt(c['base_monthly'])}/month · {fmt(annual_rate)}/year "
+                    f"— uplift vs. prior rate: **{uplift_pct:+.1f}%**"
+                )
+
     monthly_opex_vessel_base = opex_total / 12
     monthly_vessel_depreciation = (capex_nok * (depreciation_rate_pct / 100)) / 12
     monthly_maintenance_base = annual_maintenance_capex_nok / 12
@@ -3187,17 +4435,18 @@ with tab_financials:
                 monthly_smolt_voyage_cost = 0.0
                 monthly_harvest_voyage_cost = 0.0
 
-            # In spot mode, the equipment's customer lease payment (the
-            # fixed, contracted 12%-yield revenue) is cancelled — there's
-            # no secured lease contract underpinning it under spot trading.
-            # The equipment still gets bought and bank-financed exactly as
-            # configured (finance cost/amortization below are computed
-            # separately, from bank_schedule_full, and are unaffected by
-            # this); only the lease REVENUE side goes to zero, so spot
-            # revenue has to cover that cost like everything else.
-            if lease_enabled and month <= int(customer_term_months) and not spot_market_enabled:
-                lease_factor = _escalation_factor(lease_escalator_pct, month)
-                lease_revenue_this_month = lease_monthly_payment * lease_factor
+            # In spot mode, the equipment's customer lease payment is
+            # cancelled — there's no secured lease contract underpinning
+            # it under spot trading. The equipment still gets bought and
+            # bank-financed exactly as configured (finance cost/
+            # amortization below are computed separately, from
+            # bank_schedule_full, and are unaffected by this); only the
+            # lease REVENUE side goes to zero, so spot revenue has to
+            # cover that cost like everything else. In TC mode, revenue
+            # follows the Lease contract schedule above (Contract 1 = the
+            # customer lease from Tab 2; renewals 2-4 as configured).
+            if lease_enabled and not spot_market_enabled and _lease_contract_active(month):
+                lease_revenue_this_month = _revenue_for_lease_contracts(month)
                 lease_opex_this_month = lease_opex_monthly_nok  # pass-through, not escalated
             else:
                 lease_revenue_this_month = 0.0
@@ -3805,8 +5054,8 @@ with tab_investment:
                 + spot_harvest_cost_monthly_base * _escalation_factor(spot_harvest_cost_escalator_pct, month) * _util_factor_exit
             )
         ebitda_v = revenue - opex
-        if lease_enabled and month <= int(customer_term_months) and not spot_market_enabled:
-            ebitda_e = lease_monthly_payment * _escalation_factor(lease_escalator_pct, month)
+        if lease_enabled and not spot_market_enabled and _lease_contract_active(month):
+            ebitda_e = _revenue_for_lease_contracts(month)
         else:
             ebitda_e = 0.0
         return ebitda_v + ebitda_e
