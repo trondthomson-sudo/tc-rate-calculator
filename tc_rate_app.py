@@ -75,24 +75,27 @@ CONFIG_EXCLUDE_KEYS = {"unlocked", "unlock_password_input", "_config_loaded", "_
 
 def _is_excluded_key(key: str) -> bool:
     """Buttons (like the opex/service/price/voyage-cost '✕' remove
-    buttons, and '+ Add phase'-style add buttons) can't have their
-    session_state pre-set — Streamlit raises a
+    buttons, '+ Add phase'-style add buttons, and per-customer 'Clear'
+    buttons) can't have their session_state pre-set — Streamlit raises a
     StreamlitValueAssignmentNotAllowedError if you try, since buttons are
     trigger-only widgets. File uploader keys shouldn't be restored either.
-    Match on "_remove_" and "_add_" anywhere in the key (not just as a
-    prefix) so this catches every button naming pattern used across the
-    app (remove_{i}, service_remove_{i}, smolt_add_phase,
-    harvest_add_phase, and any future ones), rather than needing a new
-    prefix added here every time a new button is built. Note: "_add_"
-    specifically (underscores on both sides) — NOT a bare "add" substring
-    match, which would incorrectly exclude legitimate restorable inputs
-    like "spot_additional_capex_depreciation" (contains "add" as part of
-    "additional", not as its own "_add_" token)."""
+    Match on "_remove_", "_add_", and "_clear_" anywhere in the key (not
+    just as a prefix) so this catches every button naming pattern used
+    across the app (remove_{i}, service_remove_{i}, smolt_add_phase,
+    harvest_add_phase, spot_cust_clear_{slug}_{ci}, and any future ones),
+    rather than needing a new prefix added here every time a new button
+    is built. Note: "_add_"/"_clear_" specifically (underscores on both
+    sides) — NOT a bare substring match, which would incorrectly exclude
+    legitimate restorable inputs like "spot_additional_capex_depreciation"
+    (contains "add" as part of "additional", not as its own "_add_"
+    token)."""
     if key in CONFIG_EXCLUDE_KEYS:
         return True
     if key.startswith("remove_") or "_remove_" in key:
         return True
     if key.startswith("add_") or "_add_" in key:
+        return True
+    if key.startswith("clear_") or "_clear_" in key:
         return True
     return False
 
@@ -109,18 +112,23 @@ def _apply_config(config_dict):
 
 # Defensive cleanup, run every single pass (cheap — just a key filter):
 # strip any session_state entries for button-only keys (remove_*,
-# *_remove_*, add_*, *_add_*) that may have been set incorrectly by an
-# older app version's config file, or any other means. Buttons are
-# trigger-only widgets and can never legitimately hold a stored value;
-# setting one raises StreamlitValueAssignmentNotAllowedError — but only
-# when the button widget itself is created, not at assignment time, so
-# _apply_config's own try/except above can't catch it. This runs
+# *_remove_*, add_*, *_add_*, clear_*, *_clear_*) that may have been set
+# incorrectly by an older app version's config file, or any other means.
+# Buttons are trigger-only widgets and can never legitimately hold a
+# stored value; setting one raises StreamlitValueAssignmentNotAllowedError
+# — but only when the button widget itself is created, not at assignment
+# time, so _apply_config's own try/except above can't catch it. This runs
 # unconditionally so any already-poisoned session (from before
 # _is_excluded_key was widened to also exclude these keys) gets cleaned
-# up immediately, without needing a brand-new session.
+# up immediately, without needing a brand-new session — this is also
+# what fixes an already-saved default_config.json that has a poisoned
+# "spot_cust_clear_*" entry baked in: it strips the bad key from session
+# state every time the app loads, before that key's button ever renders.
 for _k in [
     k for k in list(st.session_state.keys())
-    if k.startswith("remove_") or "_remove_" in k or k.startswith("add_") or "_add_" in k
+    if k.startswith("remove_") or "_remove_" in k
+    or k.startswith("add_") or "_add_" in k
+    or k.startswith("clear_") or "_clear_" in k
 ]:
     del st.session_state[_k]
 
@@ -1889,6 +1897,22 @@ with tab_spot:
             "still uses the vessel TC-rate (Tab 1). Inputs below are still "
             "editable so this is ready whenever you switch it on."
         )
+
+    # --- self-healing: the sidebar's "Spot market is ON" warning runs at
+    # the very top of the script, BEFORE this toggle has even rendered —
+    # so on the pass where you actually flip it, the sidebar is still
+    # showing last pass's state (same one-pass-behind pattern used
+    # throughout this app). If it just changed, trigger one more pass so
+    # the sidebar catches up immediately instead of looking wrong until
+    # your next click. ---
+    _spot_toggle_changed = st.session_state.get("_spot_market_enabled_sidebar_sync") != spot_market_enabled
+    st.session_state["_spot_market_enabled_sidebar_sync"] = spot_market_enabled
+    _spot_toggle_retry_count = st.session_state.get("_spot_toggle_retry_count", 0)
+    if _spot_toggle_changed and _spot_toggle_retry_count < 4:
+        st.session_state["_spot_toggle_retry_count"] = _spot_toggle_retry_count + 1
+        _request_rerun()
+    else:
+        st.session_state["_spot_toggle_retry_count"] = 0
 
     st.markdown("**Utilization & service mix**")
     st.caption(
